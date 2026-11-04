@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+RUNTIME_DIR=${CATSUTILS_RUNTIME_DIR:-"$PROJECT_DIR/.runtime"}
+if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
+  JAVA_HOME=$(/usr/libexec/java_home -v 21)
+fi
+TASK_JAVA=${JAVA_HOME:+"$JAVA_HOME/bin/"}java
+if ! "$TASK_JAVA" -version 2>&1 | head -1 | grep -q '"21\.'; then
+  echo 'Java 21 is required; set JAVA_HOME to a Java 21 installation.' >&2
+  exit 1
+fi
+mkdir -p "$RUNTIME_DIR/tools" "$RUNTIME_DIR/home" "$RUNTIME_DIR/global"
+TASK_TMP_DIR=$(mktemp -d /tmp/catsutils.XXXXXX)
+trap 'rm -rf "$TASK_TMP_DIR"' EXIT HUP INT TERM
+LAUNCHER="$RUNTIME_DIR/tools/sbt-launch-1.12.11.jar"
+if [ ! -f "$LAUNCHER" ]; then
+  curl --fail --location --silent --show-error --max-time 120 \
+    https://repo.maven.apache.org/maven2/org/scala-sbt/sbt-launch/1.12.11/sbt-launch-1.12.11.jar \
+    --output "$LAUNCHER.part"
+  mv "$LAUNCHER.part" "$LAUNCHER"
+fi
+export COURSIER_CACHE="$RUNTIME_DIR/coursier"
+export COURSIER_REPOSITORIES=https://repo.maven.apache.org/maven2
+cd "$PROJECT_DIR"
+"$TASK_JAVA" -Xms256m -Xmx2g \
+  -Duser.home="$RUNTIME_DIR/home" -Djava.io.tmpdir="$TASK_TMP_DIR" \
+  -Dsbt.global.base="$RUNTIME_DIR/global" -Dsbt.boot.directory="$RUNTIME_DIR/boot" \
+  -Dsbt.ivy.home="$RUNTIME_DIR/ivy" -Dsbt.override.build.repos=true \
+  -Dsbt.repository.config="$PROJECT_DIR/project/repositories" \
+  -Dsbt.server.forcestart=true -Dsbt.server.autostart=false -Dsbt.supershell=false -Dsbt.ci=true \
+  -jar "$LAUNCHER" "$@"

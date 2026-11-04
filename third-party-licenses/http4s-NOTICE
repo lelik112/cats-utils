@@ -1,0 +1,10 @@
+http4s
+Copyright 2013-2021 http4s.org
+Licensed under Apache License 2.0 (see LICENSE)
+
+Relevant http4s attribution excerpt from the upstream NOTICE:
+https://github.com/http4s/http4s/blob/41dae411e8055cf1a41bf9f14f827f6d87e46dc4/NOTICE
+
+The upstream reference to LICENSE corresponds to http4s-LICENSE in this directory.
+This excerpt pertains to the adapted token-bucket logic. Other entries in the
+upstream NOTICE concern components not copied from http4s into this repository.
