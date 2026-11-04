@@ -122,5 +122,10 @@ are in [MIGRATION.md](MIGRATION.md).
 
 The supplied reduced TimeRange and duration configuration behavior is retained, including
 documented quirks. These tests establish the listed scenarios, not every possible scheduler
-interleaving, input extreme, or application integration. No project-wide license has been selected. Third-party terms and attribution are described in
+interleaving, input extreme, or application integration.
+
+## License
+
+This project uses the [Apache License 2.0](LICENSE), as selected by the repository owner.
+Third-party terms and attribution remain applicable as described in
 [PROVENANCE.md](PROVENANCE.md).

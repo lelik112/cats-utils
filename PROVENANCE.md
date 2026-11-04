@@ -19,8 +19,14 @@ and checked weight accounting as described in [MIGRATION.md](MIGRATION.md). Buil
 explicit metrics/context adapters, OrderedConfig and additional regressions are new adaptation
 work. Supplied scenarios remain distinguishable from added tests; see [TESTING.md](TESTING.md).
 
-No project-wide license has been selected. The third-party terms below apply to their identified
-upstream portions and do not assign a license to the repository as a whole.
+## Project license
+
+The repository owner selected the [Apache License 2.0](LICENSE) for this project, matching
+the license used by the [canonical frontend](https://github.com/lelik112/parrot669-frontend/blob/main/LICENSE).
+The license text is reproduced without adding a copyright owner or year. This selection does
+not establish per-file ownership or independently verify permissions from external rights holders.
+The author attribution above and the third-party notices below are retained; the identified
+upstream portions and dependencies continue to carry their own applicable terms.
 
 ## http4s token-bucket code
 

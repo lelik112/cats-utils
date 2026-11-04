@@ -1,6 +1,7 @@
 ThisBuild / organization := "io.github.lelik112"
 ThisBuild / scalaVersion := "2.13.18"
 ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / licenses := Seq("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0"))
 
 lazy val catsEffectVersion = "3.7.1"
 lazy val circeVersion = "0.14.10"
