@@ -4,6 +4,13 @@ This document distinguishes contracts retained from the owner-supplied reference
 adaptation choices and edge cases. See [PROVENANCE.md](PROVENANCE.md) for attribution and
 [TESTING.md](TESTING.md) for reproducible checks.
 
+## Namespace
+
+Library and test sources use `com.parrot669.catsutils`, matching the PARROT 669 namespace.
+Update consuming imports and fully qualified type references accordingly. The build
+organization is `com.parrot669` and the project name remains `cats-utils`; Maven publication
+is still disabled. This namespace change retains the utility contracts described below.
+
 ## Effect and resource APIs
 
 | Source concept | Cats Effect API |

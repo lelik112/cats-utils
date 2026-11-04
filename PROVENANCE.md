@@ -31,7 +31,7 @@ upstream portions and dependencies continue to carry their own applicable terms.
 ## http4s token-bucket code
 
 The retained source acknowledgment identifies http4s Throttle as the basis of the token-bucket
-logic in [RateLimits.scala](src/main/scala/io/github/lelik112/catsutils/RateLimits.scala).
+logic in [RateLimits.scala](src/main/scala/com/parrot669/catsutils/RateLimits.scala).
 The upstream source carries **Copyright 2014 http4s.org** and Apache License 2.0 terms.
 
 The adaptation changes the effect and result APIs, uses atomic Ref state updates, and preserves

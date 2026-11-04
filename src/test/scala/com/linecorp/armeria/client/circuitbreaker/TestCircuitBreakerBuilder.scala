@@ -2,10 +2,10 @@
 package com.linecorp.armeria.client.circuitbreaker
 
 import java.util.concurrent.atomic.AtomicLong
-
 import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.IO
+
 import com.linecorp.armeria.common.util.Ticker
 
 object TestCircuitBreakerBuilder {

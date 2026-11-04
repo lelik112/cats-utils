@@ -11,6 +11,11 @@ It downloads the pinned public sbt launcher and Maven Central dependencies into 
 `.runtime` caches. For an existing cache, set `CATSUTILS_RUNTIME_DIR` to its absolute path.
 An offline build requires those dependencies to be cached already.
 
+`scalafmtCheckAll` includes both README `scala mdoc` examples through
+`Compile / scalafmt / unmanagedSources`; Markdown is not a compiler input. To apply
+the same PARROT 669 style to sources and examples, run `./run-sbt scalafmtAll scalafmtSbt`.
+`scalafmtSbtCheck` checks build files. No mdoc plugin or runtime is required.
+
 The suite contains **257 tests**: 120 scenarios from the supplied utilities/support reference
 and 137 adaptation or regression scenarios. Tests cover all seven utilities plus TimeRange,
 configuration parsing and metrics context. Source comments distinguish supplied cases from
@@ -25,8 +30,8 @@ TestControl; selected concurrency regressions repeat multiple controlled schedul
 For a focused suite, for example:
 
 ```sh
-./run-sbt 'testOnly io.github.lelik112.catsutils.LimiterReloadTest'
-./run-sbt 'testOnly io.github.lelik112.catsutils.cache.ranged.RangeCacheTest'
+./run-sbt 'testOnly com.parrot669.catsutils.LimiterReloadTest'
+./run-sbt 'testOnly com.parrot669.catsutils.cache.ranged.RangeCacheTest'
 ```
 
 Test XML is generated under ignored `target/test-reports`. Passing these checks establishes
