@@ -12,7 +12,7 @@ import munit.CatsEffectSuite
 class CacheMetricContextTest extends CatsEffectSuite {
   test("paths are inherited by child fibers and nested paths are restored") {
     for {
-      context <- CacheMetricContext.create
+      context <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
       before  <- context.path
       values  <- context.withPath("outer") {
                    for {
@@ -27,7 +27,7 @@ class CacheMetricContextTest extends CatsEffectSuite {
 
   test("an application can resolve a path from its own context") {
     for {
-      context <- CacheMetricContext.create
+      context <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
       actual  <- context.withPathFrom(IO.pure("/items/:id"))(context.path)
       after   <- context.path
     } yield { assertEquals(actual, "/items/:id"); assertEquals(after, "") }
@@ -36,7 +36,7 @@ class CacheMetricContextTest extends CatsEffectSuite {
   test("cache counters retain name, locked and resolved path tags") {
     IO(new SimpleMeterRegistry).bracket { registry =>
       for {
-        context <- CacheMetricContext.create
+        context <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
         metrics  = SpecificCacheMetrics("context_probe", "context-test", CacheMetrics.micrometer(registry, context))
         _       <- context.withPath("/items/:id")(metrics.load *> metrics.hit(locked = true))
         _       <- IO {
@@ -63,7 +63,7 @@ class CacheMetricContextTest extends CatsEffectSuite {
 
   test("path scope restores state after a raised exception") {
     for {
-      context <- CacheMetricContext.create
+      context <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
       _       <- context.withPath("broken")(IO.raiseError[Unit](new RuntimeException("fail"))).attempt
       after   <- context.path
     } yield assertEquals(after, "")
@@ -71,7 +71,7 @@ class CacheMetricContextTest extends CatsEffectSuite {
 
   test("path scope restores state before cancellation finalizers") {
     for {
-      context  <- CacheMetricContext.create
+      context  <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
       entered  <- Deferred[IO, Unit]
       observed <- Deferred[IO, String]
       fiber    <- context
@@ -86,10 +86,10 @@ class CacheMetricContextTest extends CatsEffectSuite {
   test("gauge names, values, interval and resource-owned meter lifetime") {
     TestControl.executeEmbed(IO(new SimpleMeterRegistry).bracket { registry =>
       for {
-        context         <- CacheMetricContext.create
+        context         <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
         metrics          = CacheMetrics.micrometer(registry, context)
         allocated       <- Cache
-                             .expireAfterWrite[Int, Nothing, String](
+                             .expireAfterWrite[IO, Int, Nothing, String](
                                "metered",
                                JDuration.ofDays(1),
                                10L,
@@ -119,8 +119,8 @@ class CacheMetricContextTest extends CatsEffectSuite {
   test("adapters sharing a registry update the same labeled gauge") {
     IO(new SimpleMeterRegistry).bracket { registry =>
       for {
-        firstContext  <- CacheMetricContext.create
-        secondContext <- CacheMetricContext.create
+        firstContext  <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
+        secondContext <- cats.effect.IOLocal("").map(local => CacheMetricContext.fromLocal[IO](local.asLocal))
         first          = CacheMetrics.micrometer(registry, firstContext)
         second         = CacheMetrics.micrometer(registry, secondContext)
         _             <- first.gauge("shared", Map("name" -> "same"), 1.0)

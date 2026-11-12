@@ -5,15 +5,16 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import scala.jdk.CollectionConverters._
 
-import cats.effect.IO
+import cats.Applicative
+import cats.effect.Sync
 
 import io.micrometer.core.instrument.{Gauge, MeterRegistry, Tag}
 
 /** Explicit metric destination and request-path context. The caller owns the registry. */
-trait CacheMetrics {
-  def path: IO[String]
-  def increment(name: String, tags: Map[String, String]): IO[Unit]
-  def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit]
+trait CacheMetrics[F[_]] {
+  def path: F[String]
+  def increment(name: String, tags: Map[String, String]): F[Unit]
+  def gauge(name: String, tags: Map[String, String], value: Double): F[Unit]
 }
 
 object CacheMetrics {
@@ -29,37 +30,38 @@ object CacheMetrics {
     }
   }
 
-  val noop: CacheMetrics = new CacheMetrics {
-    def path: IO[String] = IO.pure("")
-    def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
-    def gauge(name:     String, tags: Map[String, String], value: Double): IO[Unit] = IO.unit
+  def noop[F[_]: Applicative]: CacheMetrics[F] = new CacheMetrics[F] {
+    def path: F[String] = Applicative[F].pure("")
+    def increment(name: String, tags: Map[String, String]): F[Unit] = Applicative[F].unit
+    def gauge(name:     String, tags: Map[String, String], value: Double): F[Unit] = Applicative[F].unit
   }
 
-  def micrometer(registry: MeterRegistry, context: CacheMetricContext): CacheMetrics = new CacheMetrics {
-    private val gauges = gaugesFor(registry)
+  def micrometer[F[_]: Sync](registry: MeterRegistry, context: CacheMetricContext[F]): CacheMetrics[F] =
+    new CacheMetrics[F] {
+      private def gauges = gaugesFor(registry)
 
-    def path: IO[String] = context.path
+      def path: F[String] = context.path
 
-    private def labels(tags: Map[String, String]): java.lang.Iterable[Tag] =
-      tags.toList.sortBy(_._1).map { case (key, value) => Tag.of(key, value) }.asJava
+      private def labels(tags: Map[String, String]): java.lang.Iterable[Tag] =
+        tags.toList.sortBy(_._1).map { case (key, value) => Tag.of(key, value) }.asJava
 
-    def increment(name: String, tags: Map[String, String]): IO[Unit] =
-      IO.delay(registry.counter(name, labels(tags)).increment())
+      def increment(name: String, tags: Map[String, String]): F[Unit] =
+        Sync[F].delay(registry.counter(name, labels(tags)).increment())
 
-    def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] = IO.delay {
-      val reference = gauges.computeIfAbsent(
-        (name, tags),
-        _ => {
-          val value = new AtomicReference[java.lang.Double](0.0)
-          Gauge
-            .builder(name, value, (ref: AtomicReference[java.lang.Double]) => ref.get().doubleValue())
-            .tags(labels(tags))
-            .strongReference(true)
-            .register(registry)
-          value
-        }
-      )
-      reference.set(value)
+      def gauge(name: String, tags: Map[String, String], value: Double): F[Unit] = Sync[F].delay {
+        val reference = gauges.computeIfAbsent(
+          (name, tags),
+          _ => {
+            val value = new AtomicReference[java.lang.Double](0.0)
+            Gauge
+              .builder(name, value, (ref: AtomicReference[java.lang.Double]) => ref.get().doubleValue())
+              .tags(labels(tags))
+              .strongReference(true)
+              .register(registry)
+            value
+          }
+        )
+        reference.set(value)
+      }
     }
-  }
 }

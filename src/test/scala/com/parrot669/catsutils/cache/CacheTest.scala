@@ -13,7 +13,7 @@ import munit.CatsEffectSuite
 class CacheTest extends CatsEffectSuite {
   private val day   = JDuration.ofDays(1)
   private val five  = JDuration.ofSeconds(5)
-  private def cache = Cache.expireAfterWrite[Int, Nothing, String]("test", day)
+  private def cache = Cache.expireAfterWrite[IO, Int, Nothing, String]("test", day)
   private def virtual[A](program: IO[A]): IO[A] = TestControl.executeEmbed(program)
   private val boom = new RuntimeException("boom!")
 
@@ -29,13 +29,13 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("expire values after write") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       c.put(0, "test") *> IO.sleep(5.seconds) *> c.get(0).map(v => assertEquals(v, None))
     })
   }
 
   test("expire values after access") {
-    virtual(Cache.expireAfterAccess[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterAccess[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         _      <- c.put(0, "test")
         _      <- IO.sleep(3.seconds) *> c.get(0)
@@ -94,7 +94,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("cache business errors") {
-    Cache.expireAfterWrite[Int, String, String]("test", day).use { c =>
+    Cache.expireAfterWrite[IO, Int, String, String]("test", day).use { c =>
       for {
         first  <- c.getOrUpdate(0)(IO.pure(Left("boom!")))
         second <- c.getOrUpdate(0)(IO.pure(Right("test")))
@@ -111,13 +111,13 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("expire loaded values after write") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       c.getOrUpdateValue(0)(IO.pure("test")) *> IO.sleep(5.seconds) *> c.get(0).map(v => assertEquals(v, None))
     })
   }
 
   test("expire loaded values after access") {
-    virtual(Cache.expireAfterAccess[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterAccess[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         _      <- c.getOrUpdateValue(0)(IO.pure("test"))
         _      <- IO.sleep(3.seconds) *> c.get(0)
@@ -179,7 +179,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("expire value via refresh option") {
-    virtual(Cache.expireAfterAccess[Int, Nothing, String]("test", five, Some(JDuration.ofSeconds(12))).use { c =>
+    virtual(Cache.expireAfterAccess[IO, Int, Nothing, String]("test", five, Some(JDuration.ofSeconds(12))).use { c =>
       for {
         _      <- c.getOrUpdateValue(0)(IO.pure("test"))
         _      <- IO.sleep(4.seconds) *> c.get(0)
@@ -191,7 +191,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("expire value via expiration option") {
-    virtual(Cache.expireAfterAccess[Int, Nothing, String]("test", five, Some(JDuration.ofSeconds(11))).use { c =>
+    virtual(Cache.expireAfterAccess[IO, Int, Nothing, String]("test", five, Some(JDuration.ofSeconds(11))).use { c =>
       c.getOrUpdateValue(0)(IO.pure("test")) *> IO.sleep(6.seconds) *> c.get(0).map(v => assertEquals(v, None))
     })
   }
@@ -235,7 +235,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("business errors are invisible to get and expire normally") {
-    virtual(Cache.expireAfterWrite[Int, String, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, String, String]("test", five).use { c =>
       for {
         _      <- c.getOrUpdate(0)(IO.pure(Left("business")))
         hidden <- c.get(0)
@@ -308,7 +308,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("expired loading entry does not overwrite a new generation") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         started <- Deferred[IO, Unit]
         finish  <- Deferred[IO, Unit]
@@ -322,7 +322,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("weighted values stay within capacity and errors weigh one") {
-    Cache.expireAfterWrite[Int, String, String]("weighted", day, 5L, (value: String) => value.length).use { c =>
+    Cache.expireAfterWrite[IO, Int, String, String]("weighted", day, 5L, (value: String) => value.length).use { c =>
       for {
         _         <- c.put(0, "abc")
         initial   <- c.weight
@@ -335,7 +335,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("a slow loader receives a fresh expiration lifetime after completion") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         value   <- c.getOrUpdateValue(0)(IO.sleep(10.seconds).as("slow"))
         cached  <- c.get(0)
@@ -346,7 +346,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("invalidation retires an already expired loading generation") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         started <- Deferred[IO, Unit]
         finish  <- Deferred[IO, Unit]
@@ -359,7 +359,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("zero-weight values can be cached after a loading placeholder is evicted") {
-    Cache.expireAfterWrite[Int, Nothing, String]("zero", day, 0L, (_: String) => 0).use { c =>
+    Cache.expireAfterWrite[IO, Int, Nothing, String]("zero", day, 0L, (_: String) => 0).use { c =>
       for {
         loaded <- c.getOrUpdateValue(0)(IO.pure("empty"))
         cached <- c.get(0)
@@ -369,7 +369,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("invalid weight configuration fails within resource acquisition") {
-    Cache.make[Int, Nothing, String]("bad", Some(day), None, Some(1L), None).use(_ => IO.unit).attempt.map {
+    Cache.make[IO, Int, Nothing, String]("bad", Some(day), None, Some(1L), None).use(_ => IO.unit).attempt.map {
       case Left(_: IllegalArgumentException) => ()
       case other                             => fail(s"Expected validation error, got $other")
     }
@@ -378,7 +378,7 @@ class CacheTest extends CatsEffectSuite {
   test("throwing publication weigher releases waiters and allows retry") {
     virtual(
       Cache
-        .expireAfterWrite[Int, Nothing, String](
+        .expireAfterWrite[IO, Int, Nothing, String](
           "weigher",
           day,
           10L,
@@ -403,7 +403,7 @@ class CacheTest extends CatsEffectSuite {
 
   test("negative publication weight fails without poisoning subsequent loads") {
     Cache
-      .expireAfterWrite[Int, Nothing, String](
+      .expireAfterWrite[IO, Int, Nothing, String](
         "weigher",
         day,
         10L,
@@ -419,7 +419,7 @@ class CacheTest extends CatsEffectSuite {
 
   test("failed explicit put preserves an active loader and its publication") {
     Cache
-      .expireAfterWrite[Int, Nothing, String](
+      .expireAfterWrite[IO, Int, Nothing, String](
         "weigher",
         day,
         10L,
@@ -439,7 +439,7 @@ class CacheTest extends CatsEffectSuite {
   }
 
   test("keys and size remove expired entries") {
-    virtual(Cache.expireAfterWrite[Int, Nothing, String]("test", five).use { c =>
+    virtual(Cache.expireAfterWrite[IO, Int, Nothing, String]("test", five).use { c =>
       for {
         _     <- c.put(0, "a") *> c.put(1, "b")
         keys  <- c.keys

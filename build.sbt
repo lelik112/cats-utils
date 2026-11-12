@@ -13,6 +13,7 @@ lazy val root = (project in file("."))
     javacOptions ++= Seq("--release", "21"),
     libraryDependencies ++= Seq(
       "org.typelevel"                %% "cats-effect"                    % catsEffectVersion,
+      "org.typelevel"                %% "cats-mtl"                       % "1.6.0",
       "org.typelevel"                %% "cats-core"                      % "2.13.0",
       "co.fs2"                       %% "fs2-core"                       % "3.12.2",
       "com.github.ben-manes.caffeine" % "caffeine"                       % "3.2.4",

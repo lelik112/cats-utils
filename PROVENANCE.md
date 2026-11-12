@@ -13,7 +13,7 @@ Private repository identifiers, internal integrations and local review reports a
 in this public source tree. The supporting TimeRange and duration reader are reduced excerpts
 that accompanied the reference.
 
-The adaptation replaces ZIO with Cats Effect IO, Resource and FS2. It changes APIs,
+The adaptation replaces ZIO with effect-polymorphic Cats Effect (`F[_]`), Resource and FS2. It changes APIs,
 cancellation/resource handling, concurrent cache generations, limiter configuration ordering
 and checked weight accounting as described in [MIGRATION.md](MIGRATION.md). Build support,
 explicit metrics/context adapters, OrderedConfig and additional regressions are new adaptation

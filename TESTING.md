@@ -16,11 +16,15 @@ An offline build requires those dependencies to be cached already.
 the same PARROT 669 style to sources and examples, run `./run-sbt scalafmtAll scalafmtSbt`.
 `scalafmtSbtCheck` checks build files. No mdoc plugin or runtime is required.
 
-The suite contains **257 tests**: 120 scenarios from the supplied utilities/support reference
-and 137 adaptation or regression scenarios. Tests cover all seven utilities plus TimeRange,
+The suite contains **270 tests**: 120 scenarios from the supplied utilities/support reference
+and 150 adaptation or regression scenarios. Tests cover all seven utilities plus TimeRange,
 configuration parsing and metrics context. Source comments distinguish supplied cases from
-added coverage. Assertions and test behavior are retained; two test fixture identifiers use
-neutral example values.
+added coverage. Nine effect-polymorphism tests instantiate all effectful public utilities with
+`Kleisli[IO, String, *]`, including loader cancellation, ordered range streams, context isolation
+and background meter lifetime. Four additional capability tests compile generic factory wrappers
+without `Async` evidence and exercise the weaker APIs, including `SyncIO` for the token bucket and
+a custom RangeCache facade. The underlying IO is owned only by the test runner. Assertions and
+test behavior are retained; two test fixture identifiers use neutral example values.
 
 Regression coverage includes loader/waiter cancellation, resource finalizers, typed versus
 raised errors, expiration and invalidation generations, ordered parallel range loads, limiter

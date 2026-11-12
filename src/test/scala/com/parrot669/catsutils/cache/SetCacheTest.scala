@@ -12,8 +12,8 @@ import cats.syntax.all._
 import munit.CatsEffectSuite
 
 class SetCacheTest extends CatsEffectSuite {
-  private def cache(empty: Boolean = false): Resource[IO, SetCache[String, String, Int]] =
-    SetCache.expireAfterWrite[String, String, Int]("test", Duration.ofMinutes(1), cacheEmptyKeys = empty)
+  private def cache(empty: Boolean = false): Resource[IO, SetCache[IO, String, String, Int]] =
+    SetCache.expireAfterWrite[IO, String, String, Int]("test", Duration.ofMinutes(1), cacheEmptyKeys = empty)
 
   test("[source] stores and returns values. cacheEmptyKeys = false") {
     TestControl.executeEmbed(cache().use { cache =>
@@ -239,8 +239,8 @@ class SetCacheTest extends CatsEffectSuite {
   }
 
   List(
-    SetCache.expireAfterWrite[String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false),
-    SetCache.expireAfterAccess[String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false)
+    SetCache.expireAfterWrite[IO, String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false),
+    SetCache.expireAfterAccess[IO, String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false)
   ).zipWithIndex.foreach { case (resource, index) =>
     test(s"[cats-effect] zero expiration mode $index completes requests without retaining data") {
       TestControl.executeEmbed(resource.use { cache =>
@@ -256,7 +256,7 @@ class SetCacheTest extends CatsEffectSuite {
   }
 
   test("[cats-effect] zero maximum weight returns loaded values and retains only zero-weight results") {
-    val resource = SetCache.expireAfterWrite[String, String, Int](
+    val resource = SetCache.expireAfterWrite[IO, String, String, Int](
       "test",
       Duration.ofMinutes(1),
       (_: Int) => 1,
@@ -279,7 +279,7 @@ class SetCacheTest extends CatsEffectSuite {
   }
 
   test("[cats-effect] oversized loaded sets are returned but are not retained") {
-    val resource = SetCache.expireAfterAccess[String, String, Int](
+    val resource = SetCache.expireAfterAccess[IO, String, String, Int](
       "test",
       Duration.ofMinutes(1),
       None,
@@ -303,7 +303,7 @@ class SetCacheTest extends CatsEffectSuite {
   }
 
   test("[cats-effect] access expiry is extended by cache hits") {
-    val resource = SetCache.expireAfterAccess[String, String, Int](
+    val resource = SetCache.expireAfterAccess[IO, String, String, Int](
       "test",
       Duration.ofSeconds(10),
       cacheEmptyKeys = false

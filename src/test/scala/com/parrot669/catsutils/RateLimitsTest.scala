@@ -112,7 +112,7 @@ class RateLimitsTest extends CatsEffectSuite {
   test("denied attempts retain partial refill credit and refill is capped at capacity") {
     TestControl.executeEmbed {
       for {
-        bucket  <- RateLimits.TokenBucket.make(3, Duration.ofSeconds(10))
+        bucket  <- RateLimits.TokenBucket.make[IO](3, Duration.ofSeconds(10))
         initial <- bucket.take.replicateA(4)
         _       <- IO.sleep(5.seconds)
         half    <- bucket.take
@@ -132,7 +132,7 @@ class RateLimitsTest extends CatsEffectSuite {
   test("zero refill duration retains the source behavior") {
     TestControl.executeEmbed {
       for {
-        bucket      <- RateLimits.TokenBucket.make(1, Duration.ZERO)
+        bucket      <- RateLimits.TokenBucket.make[IO](1, Duration.ZERO)
         initial     <- bucket.take.replicateA(2)
         _           <- IO.sleep(1.nanosecond)
         replenished <- bucket.take
@@ -145,8 +145,8 @@ class RateLimitsTest extends CatsEffectSuite {
 
   test("invalid capacity and negative refill duration raise exceptions") {
     for {
-      capacity <- RateLimits.TokenBucket.make(0, Duration.ofSeconds(1)).attempt
-      interval <- RateLimits.TokenBucket.make(1, Duration.ofSeconds(-1)).attempt
+      capacity <- RateLimits.TokenBucket.make[IO](0, Duration.ofSeconds(1)).attempt
+      interval <- RateLimits.TokenBucket.make[IO](1, Duration.ofSeconds(-1)).attempt
     } yield {
       assert(capacity.left.exists(_.isInstanceOf[IllegalArgumentException]))
       assert(interval.left.exists(_.isInstanceOf[IllegalArgumentException]))
@@ -173,7 +173,7 @@ class RateLimitsTest extends CatsEffectSuite {
     TestControl.executeEmbed {
       for {
         observations <- Ref.of[IO, Vector[(String, Map[String, String], Double)]](Vector.empty)
-        metrics       = new CacheMetrics {
+        metrics       = new CacheMetrics[IO] {
                           def path: IO[String] = IO.pure("")
                           def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
                           def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] =

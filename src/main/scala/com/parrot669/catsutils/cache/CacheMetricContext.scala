@@ -1,20 +1,23 @@
 package com.parrot669.catsutils.cache
 
-import cats.effect.{IO, IOLocal}
+import cats.FlatMap
+import cats.mtl.Local
+import cats.syntax.all._
 
-/** Allocated explicitly: child fibers inherit the path; nested scopes restore their caller's path. */
-final class CacheMetricContext private (local: IOLocal[String]) {
-  def path: IO[String] = local.get
+/** Request-local context supplied by the application. The application must provide a concurrency-safe Local with isolated, nested scopes. */
+final class CacheMetricContext[F[_]] private (local: Local[F, String]) {
+  def path: F[String] = local.ask
 
-  def withPath[A](path: String)(effect: IO[A]): IO[A] =
-    IO.uncancelable { poll =>
-      local.get.flatMap(previous => local.set(path) *> poll(effect).guarantee(local.set(previous)))
-    }
+  def withPath[A](path: String)(effect: F[A]): F[A] =
+    local.local(effect)(_ => path)
 
-  def withPathFrom[A](source: IO[String])(effect: IO[A]): IO[A] =
+  def withPathFrom[A](source: F[String])(effect: F[A])(implicit F: FlatMap[F]): F[A] =
     source.flatMap(path => withPath(path)(effect))
 }
 
 object CacheMetricContext {
-  def create: IO[CacheMetricContext] = IOLocal("").map(new CacheMetricContext(_))
+
+  /** The application chooses and allocates its context carrier; no global shared Ref is used. */
+  def fromLocal[F[_]](local: Local[F, String]): CacheMetricContext[F] =
+    new CacheMetricContext(local)
 }

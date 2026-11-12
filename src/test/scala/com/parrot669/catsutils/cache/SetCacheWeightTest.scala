@@ -10,11 +10,11 @@ import munit.CatsEffectSuite
 
 class SetCacheWeightTest extends CatsEffectSuite {
   List("write", "access").foreach { mode =>
-    def cache(size: Int => Int = identity, maximum: Long = Long.MaxValue): Resource[IO, SetCache[Int, Int, Int]] =
+    def cache(size: Int => Int = identity, maximum: Long = Long.MaxValue): Resource[IO, SetCache[IO, Int, Int, Int]] =
       if (mode == "write")
-        SetCache.expireAfterWrite[Int, Int, Int]("weight-review", Duration.ofDays(1), size, maximum, false)
+        SetCache.expireAfterWrite[IO, Int, Int, Int]("weight-review", Duration.ofDays(1), size, maximum, false)
       else
-        SetCache.expireAfterAccess[Int, Int, Int]("weight-review", Duration.ofDays(1), None, size, maximum, false)
+        SetCache.expireAfterAccess[IO, Int, Int, Int]("weight-review", Duration.ofDays(1), None, size, maximum, false)
 
     test(s"$mode: aggregates above Int.MaxValue return successfully without retention for any maximum") {
       TestControl.executeEmbed {

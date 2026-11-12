@@ -7,6 +7,7 @@ import scala.concurrent.duration._
 import cats.effect.syntax.all._
 import cats.effect.testkit.TestControl
 import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Sync, Temporal}
 import cats.syntax.all._
 
 import com.parrot669.catsutils.cache.ranged.RangeCache.Config
@@ -19,11 +20,15 @@ class RangeCacheTest extends CatsEffectSuite {
   private val hour    = Duration.ofHours(1)
   private val default = Config.expireAfterWrite(minute)
 
-  private def resource(config: Config = default, reversed: Boolean = false): Resource[IO, RangeCache[String, Int]] =
-    RangeCache.make[String, Int]("test", config)(if (reversed) Ordering[Instant].reverse else Ordering[Instant])
+  private def resource(config: Config = default, reversed: Boolean = false): Resource[IO, RangeCache[IO, String, Int]] =
+    RangeCache.make[IO, String, Int]("test", config)(
+      Sync[IO],
+      Temporal[IO],
+      if (reversed) Ordering[Instant].reverse else Ordering[Instant]
+    )
 
   private def run(config: Config = default, reversed: Boolean = false)(
-    body: RangeCache[String, Int] => IO[Unit]
+    body: RangeCache[IO, String, Int] => IO[Unit]
   ): IO[Unit] = TestControl.executeEmbed(resource(config, reversed).use(body))
 
   // Each iteration registers all fourteen original scenarios with the original direction-specific assertions.
@@ -268,9 +273,9 @@ class RangeCacheTest extends CatsEffectSuite {
         now      <- IO.realTimeInstant
         before    = now.minusSeconds(60)
         after     = now.plusSeconds(60)
-        future   <- TimeRange.makeIO(now, after)
+        future   <- TimeRange.makeF[IO](now, after)
         read0    <- cache.getOrUpdate("test", future)(_ => IO.raiseError(new AssertionError("boom!")))
-        overlaps <- TimeRange.makeIO(before, after.plusSeconds(60))
+        overlaps <- TimeRange.makeF[IO](before, after.plusSeconds(60))
         read1    <- cache.getOrUpdate("test", overlaps)(_ => IO.pure(Seq(before -> 1, after -> 2)))
       } yield {
         assert(read0.isEmpty)

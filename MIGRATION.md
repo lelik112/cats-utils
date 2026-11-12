@@ -11,22 +11,48 @@ Update consuming imports and fully qualified type references accordingly. The bu
 organization is `com.parrot669` and the project name remains `cats-utils`; Maven publication
 is still disabled. This namespace change retains the utility contracts described below.
 
+## Migrating the initial IO API to F
+
+Effect-bearing types and constructors now take `F[_]` as the first type parameter.
+Use `Cache[F, K, E, V]` / `Cache.UCache[F, K, V]`, `SetCache[F, K1, K2, V]`,
+`RangeCache[F, K, V]`, `RateLimits[F]`, `RateLimits.TokenBucket[F]`,
+`HistoricalLimits[F]`, and `CircuitBreakers[F]` / `CircuitBreakers.Guarded[F, A]`.
+Metrics use `CacheMetrics[F]` and `CacheMetricContext[F]` throughout. `Outcome`, `Resource`,
+FS2 streams, loaders, fallbacks, configuration reads, and callbacks all retain the same `F`.
+
+`TimeRange.makeIO` is replaced by `TimeRange.makeF[F: Sync]` (both overloads). Validation
+still runs only when the effect runs. `CacheMetricContext.create` is replaced by
+`CacheMetricContext.fromLocal[F](local)`: the application supplies a concurrency-safe Cats MTL Local.
+For IO, allocate `IOLocal("")` in the application and pass `.asLocal`. For `Kleisli`, use its
+Local instance. A shared mutable `Ref` is not a replacement for fiber-local context.
+
+Cache and limiter factories take separate `Sync[F]` and `Temporal[F]` evidence. Circuit-breaker
+factories take `Sync[F]` and `Concurrent[F]`. No `Async[F]` instance is required. If an application
+passes implicit arguments explicitly, update that argument list as well: for example, RangeCache
+construction now takes `Sync[F]`, `Temporal[F]`, then the instant ordering. Normally these are
+inferred. See the README's effect requirements for the weaker supporting and abstract APIs.
+
+This migration deliberately changes source signatures, not cache retention, typed errors,
+configuration ordering, cancellation ownership, or limiter/circuit-breaker policy.
+The original IO tests remain runtime-bound tests; transformer tests verify that the public API
+and implementations also run without IO fixed inside the library.
+
 ## Effect and resource APIs
 
 | Source concept | Cats Effect API |
 | --- | --- |
-| `ZIO[R, E, A]` environment and typed failure | Explicit parameters/closures plus `IO[Either[E, A]]` where typed failure matters |
-| `UIO[A]` and defects | `IO[A]`; a raised Throwable remains an effect failure, not a cached business error |
-| `Scope` and `forkScoped` | `Resource[IO, A]` and a resource-owned metric fiber |
+| `ZIO[R, E, A]` environment and typed failure | Explicit parameters/closures plus `F[Either[E, A]]` where typed failure matters |
+| `UIO[A]` and defects | `F[A]`; a raised Throwable remains an effect failure, not a cached business error |
+| `Scope` and `forkScoped` | `Resource[F, A]` and a resource-owned metric fiber |
 | `Promise` carrying an exit | `Deferred` carrying completed business result, exception, or retry signal |
 | ZIO `Exit` success predicate | An effectful Cats Effect `Outcome` predicate |
 | Scoped exit predicate | An effectful `Resource.ExitCase` predicate |
-| `ZStream` | FS2 `Stream[IO, A]`, or `Stream[IO, Either[E, A]]` for typed business failures |
+| `ZStream` | FS2 `Stream[F, A]`, or `Stream[F, Either[E, A]]` for typed business failures |
 | ZIO nonempty set | Scala `Set`; an empty request returns empty without a load |
-| Fiber-local log annotation | Explicitly allocated `CacheMetricContext` backed by `IOLocal` |
-| ZIO Duration | `java.time.Duration`; IO sleeps/tests use Scala finite durations |
+| Fiber-local log annotation | `CacheMetricContext[F]` backed by application-supplied `cats.mtl.Local[F, String]` |
+| ZIO Duration | `java.time.Duration`; Effect sleeps and IO test runners use Scala finite durations |
 
-This module is IO-specific. It avoids unsafe runtimes and global effect execution to bridge
+This module is polymorphic in `F[_]`; effectful constructors use Cats Effect constraints. It avoids unsafe runtimes and global effect execution to bridge
 synchronous Java callbacks. Allocation and operations remain lazy effects; by-name raw-cache
 loaders are not evaluated on hits. Public resource handles should be used within their allocation
 scope. Closing a cache resource stops its meter; it does not cancel unrelated request fibers that
@@ -59,7 +85,7 @@ Intentional corrections:
   throws, current waiters fail and later callers can retry; a failed explicit put leaves an active
   loader intact. `maxWeight` and `weigher` must be supplied together.
 - Canceling `get` remains cancellation rather than being swallowed as a cache miss. There is no
-  ZIO composite Cause tree; exceptions use the ordinary IO error channel.
+  ZIO composite Cause tree; exceptions use the ordinary effect error channel.
 - A monotonic effect clock updates Caffeine's ticker using an atomic maximum, so TestControl and
   concurrent clock reads work without `unsafeRunSync`. Caffeine maintenance executes directly.
   Expired values are enforced on access/explicit maintenance and the 30-second metric loop rather
@@ -111,9 +137,9 @@ RangeCache preserves the following distinctions:
   does not promise which concurrent failure will be observed or which unfinished values will emit.
 - Actual fills execute in supervised child fibers, including in the sequential path. The supervisor
   is scoped inside the per-key permit: child cancellation and finalizers complete before the permit
-  is released or a terminal result is emitted. A fill that cancels itself cancels the requesting IO;
-  it does not become a successful empty stream or a business Left. Child fibers inherit IOLocal
-  context, but their local mutations do not merge into the caller's fiber. This explicit ownership
+  is released or a terminal result is emitted. A fill that cancels itself cancels the requesting effect;
+  it does not become a successful empty stream or a business Left. Child fibers use the application's context carrier. With the IO application adapter, IOLocal
+  changes in child fibers do not merge into the caller's fiber. This explicit ownership
   is a deliberate lifecycle change needed to distinguish self-cancellation from consumer termination.
 - Only consumed successful gap results are committed. Taking an early prefix or cancellation closes
   the permit and cancels outstanding loads; already committed gaps remain reusable.
@@ -127,11 +153,11 @@ lock wait. These are deliberate corrections to invalid-configuration/prolonged-w
 RateLimits preserves capacity, fractional per-token refill, path/user overrides, per-key isolation,
 and reset when configuration changes. HistoricalLimits consumes a token only when the start instant
 is **strictly before** the age threshold. Both retain the one-minute access-expiring bucket cache.
-Nonpositive capacity and negative refill duration fail the IO. The source's zero refill interval is
+Nonpositive capacity and negative refill duration fail the effect. The source's zero refill interval is
 retained: at an unchanged clock instant it does not refill; after time advances it fills to capacity.
 
 Concurrent configuration reads receive increasing tickets immediately before evaluating the supplied
-IO. Reads run outside the limiter mutex. After a read succeeds, the latest accepted snapshot is the
+effect. Reads run outside the limiter mutex. After a read succeeds, the latest accepted snapshot is the
 one with the greatest read-start ticket; an older completing read uses that accepted full snapshot.
 Accepting a snapshot, selecting/replacing its effective bucket and consuming a token share one short
 critical section per limiter instance. Equal snapshots also advance the accepted ticket, so a delayed
@@ -139,7 +165,7 @@ read cannot reset an exhausted bucket after a same-value read or an A-to-B-to-A 
 age checks use the same accepted snapshot. Failed/canceled reads and canceled mutex waiters publish
 nothing; cancellation after entering the masked transaction may still consume a token.
 
-This corrects the source's invalidate-and-retry race. The existing IO[Config] API carries no external
+This corrects the source's invalidate-and-retry race. The existing F[Config] API carries no external
 revision: tickets order read initiation, not actual revisions in a remote configuration service. An
 older-started read returning genuinely newer external data can therefore be superseded by a
 later-started accepted read. Callers needing external revision ordering must provide an appropriately
@@ -147,7 +173,7 @@ consistent configuration source; the limiter cannot infer revisions from configu
 
 CircuitBreakers retains Armeria configuration, path isolation, reload, half-open/open windows,
 fallback handlers and custom outcome classification. `guardEither` treats Left as failure by default;
-plain `guard` sees a normally returned Left as successful IO completion. `Resource.ExitCase` does not
+plain `guard` sees a normally returned Left as successful effect completion. `Resource.ExitCase` does not
 carry a return value, so `scoped` cannot infer a business Left from the use result. Wrap the complete
 `resource.use` in `guardEither` when that classification is required. Inner finalizer failures are
 included when the guard wraps the full use; the scoped observer sees the exit supplied by Resource.
@@ -162,7 +188,7 @@ Effect finalizer semantics; predicates should be total for reliable breaker acco
 
 TimeRange retains zoned construction validation, instant equality/order, half-open membership,
 `from`/`to` codecs, and the enclosing union. `smallest` adds exactly 1000 nanoseconds despite the
-retained source comment mentioning milliseconds. `makeIO` replaces `makeUIO` and raises
+retained source comment mentioning milliseconds. `makeF[F]` replaces the original `makeUIO` and raises
 RuntimeException lazily for validation failures. Java temporal conversion/overflow errors remain
 possible for unsupported extremes; the reduced source's omitted integrations remain omitted.
 
@@ -170,7 +196,7 @@ The duration reader preserves finite durations, including negative values, and m
 Scala duration to `Duration.ofNanos(Long.MaxValue)` as the source did. This sentinel is not mathematical
 infinity. Utility-specific validation still applies afterward.
 
-Global ZIO metrics become an explicit `CacheMetrics` adapter, disabled by default. Metric names,
+Global ZIO metrics become an explicit `CacheMetrics[F]` adapter, disabled by default. Metric names,
 labels, limiter cache names and the 30-second resource lifetime are retained. Adapter instances
 sharing a registry share backing for the same labeled gauge. Application code owns registry creation,
 exporter selection and shutdown; no exporter or server is automatically started.
