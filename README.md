@@ -53,14 +53,16 @@ or captured in loader functions.
 ```scala mdoc
 import java.time.Duration
 
-import cats.effect.Async
+import cats.effect.{Sync, Temporal}
 
 import com.parrot669.catsutils.cache.Cache
 
-def example[F[_]: Async]: F[Either[String, Int]] =
-  Cache.expireAfterWrite[F, String, String, Int]("answer", Duration.ofMinutes(5)).use { cache =>
-    cache.getOrUpdate("key")(Async[F].pure(Right(42)))
-  }
+def example[F[_]: Sync: Temporal]: F[Either[String, Int]] =
+  Cache
+    .expireAfterWrite[F, String, String, Int]("answer", Duration.ofMinutes(5))
+    .use { cache =>
+      cache.getOrUpdate("key")(Temporal[F].pure(Right(42)))
+    }(Temporal[F])
 ```
 
 `Cache[F, K, E, V]` loaders return `F[Either[E, V]]` or `F[Either[E, Option[V]]]`.
@@ -87,11 +89,23 @@ Plain `guard[A]()` classifies successful effect completion as success. Both allo
 
 The effect parameter is first: `Cache[F, K, E, V]`, `SetCache[F, K1, K2, V]`,
 `RangeCache[F, K, V]`, `RateLimits[F]`, `HistoricalLimits[F]`, and `CircuitBreakers[F]`.
-Factories for caches, limiters, and circuit breakers require `Async[F]`: their implementations
-combine suspended Java calls with effect clocks, references, cancellation, and concurrent work.
-`TokenBucket.make[F]` only requires `Temporal[F]`; `TimeRange.makeF[F]` and the Micrometer
-adapter require `Sync[F]`. `CacheMetrics.noop[F]` requires only `Applicative[F]`.
-The context adapter needs `Monad[F]` and an explicit `Local[F, String]` carrier.
+Cache and limiter factories require `Sync[F]` for suspended Java operations and `Temporal[F]`
+for concurrency, clocks, and the resource-owned meter's sleep. Circuit-breaker construction needs
+`Sync[F]` and `Concurrent[F]`, without a sleep capability. No factory requires `Async[F]` or
+callback registration. Supply coherent instances for the same effect runtime; the capabilities
+are separate so standard transformer instances can be inferred. When both are abstract implicit
+parameters, pass one explicitly for shared parent capabilities, such as `Resource.use`'s
+`MonadCancel` in the example above, to avoid ambiguous implicit search.
+
+`TokenBucket.make[F]` requires `MonadThrow[F]`, `Clock[F]`, and `Ref.Make[F]`; it can run in `SyncIO`.
+`TimeRange.makeF[F]` and the Micrometer adapter require `Sync[F]`.
+`CacheMetrics.noop[F]` requires only `Applicative[F]`. The context adapter needs only the explicit
+`Local[F, String]` carrier; `withPathFrom` additionally needs `FlatMap[F]`.
+
+The abstract service APIs are weaker than their factories: `Cache` needs `Functor` and `Defer`,
+`SetCache` needs `Functor`, `RangeCache` needs `Functor` and an FS2 `Compiler[F, F]`, and
+`CircuitBreakers` needs `ApplicativeThrow`. These constraints cover their convenience methods;
+custom implementations do not inherit the built-in factories' runtime requirements.
 No library method executes an unsafe runtime or converts the caller's effect to IO.
 
 This is a source-breaking change: add the effect argument to types and explicitly typed

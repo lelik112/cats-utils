@@ -7,6 +7,7 @@ import scala.concurrent.duration._
 import cats.effect.syntax.all._
 import cats.effect.testkit.TestControl
 import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Sync, Temporal}
 import cats.syntax.all._
 
 import com.parrot669.catsutils.cache.ranged.RangeCache.Config
@@ -21,7 +22,8 @@ class RangeCacheTest extends CatsEffectSuite {
 
   private def resource(config: Config = default, reversed: Boolean = false): Resource[IO, RangeCache[IO, String, Int]] =
     RangeCache.make[IO, String, Int]("test", config)(
-      implicitly[cats.effect.Async[IO]],
+      Sync[IO],
+      Temporal[IO],
       if (reversed) Ordering[Instant].reverse else Ordering[Instant]
     )
 

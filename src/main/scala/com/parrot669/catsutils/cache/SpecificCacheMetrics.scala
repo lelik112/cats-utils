@@ -1,6 +1,7 @@
 // Adapted from owner-supplied utilities attributed to Bobylev (Бобылев); see PROVENANCE.md.
 package com.parrot669.catsutils.cache
 
+import cats.FlatMap
 import cats.syntax.all._
 
 private[cache] trait SpecificCacheMetrics[F[_]] {
@@ -9,7 +10,7 @@ private[cache] trait SpecificCacheMetrics[F[_]] {
 }
 
 private[cache] object SpecificCacheMetrics {
-  def apply[F[_]: cats.Monad](
+  def apply[F[_]: FlatMap](
     specificName: String,
     cacheName:    String,
     metrics:      CacheMetrics[F]

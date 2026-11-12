@@ -6,15 +6,16 @@ import scala.collection.SortedMap
 
 import cats.effect.std.{Semaphore, Supervisor}
 import cats.effect.syntax.all._
-import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
+import cats.effect.{Concurrent, Deferred, Outcome, Ref, Resource, Sync, Temporal}
 import cats.syntax.all._
+import cats.{Defer, Functor}
 
 import com.parrot669.catsutils.cache.{Cache, CacheMetrics, SpecificCacheMetrics}
 import com.parrot669.catsutils.domain.TimeRange
 
-import fs2.Stream
+import fs2.{Compiler, Stream}
 
-abstract class RangeCache[F[_]: cats.effect.Concurrent, K, V] {
+abstract class RangeCache[F[_], K, V](implicit F: Functor[F], compiler: Compiler[F, F]) {
   final def getOrUpdate(key: K, range: TimeRange)(
     fill: TimeRange => F[Iterable[(Instant, V)]]
   ): F[List[V]] = getOrUpdateOption(key, range)(gap => fill(gap).map(value => Some(value)))
@@ -122,7 +123,7 @@ object RangeCache {
   }
 
   private object Entry {
-    def empty[F[_]: Async, A](implicit order: Ordering[Instant]): F[Entry[F, A]] =
+    def empty[F[_]: Concurrent, A](implicit order: Ordering[Instant]): F[Entry[F, A]] =
       (Semaphore[F](1), Ref.of[F, Instant](Instant.MAX)).mapN(Entry(RangeMap.empty[A], _, _))
   }
 
@@ -132,21 +133,33 @@ object RangeCache {
   private final class BusinessLoadFailure                                                      extends RuntimeException(null, null, false, false)
   private final class CanceledLoad                                                             extends RuntimeException(null, null, false, false)
 
-  def make[F[_]: Async, K, V](name: String, config: Config)(implicit
+  def make[F[_]: Sync: Temporal, K, V](name: String, config: Config)(implicit
     order: Ordering[Instant]
   ): Resource[F, RangeCache[F, K, V]] =
-    make(name, config, CacheMetrics.noop[F])
+    make(name, config, CacheMetrics.noop[F](Temporal[F]))
 
-  def make[F[_]: Async, K, V](
+  def make[F[_]: Sync: Temporal, K, V](
     name:    String,
     config:  Config,
     metrics: CacheMetrics[F]
-  )(implicit order: Ordering[Instant]): Resource[F, RangeCache[F, K, V]] = {
+  )(implicit order: Ordering[Instant]): Resource[F, RangeCache[F, K, V]] =
+    build(name, config, metrics, Sync[F])(Temporal[F], order)
+
+  private def build[F[_], K, V](name: String, config: Config, metrics: CacheMetrics[F], S: Sync[F])(implicit
+    F:     Temporal[F],
+    order: Ordering[Instant]
+  ): Resource[F, RangeCache[F, K, V]] = {
     val cache = (config.expireAfterWrite, config.maxWeight) match {
       case (Some(duration), Some(weight)) =>
-        Cache.expireAfterWrite[F, K, Nothing, Entry[F, V]](name, duration, weight, (_: Entry[F, V]).state.size, metrics)
+        Cache.expireAfterWrite[F, K, Nothing, Entry[F, V]](
+          name,
+          duration,
+          weight,
+          (_: Entry[F, V]).state.size,
+          metrics
+        )(S, F)
       case (Some(duration), None)         =>
-        Cache.expireAfterWrite[F, K, Nothing, Entry[F, V]](name, duration, metrics)
+        Cache.expireAfterWrite[F, K, Nothing, Entry[F, V]](name, duration, metrics)(S, F)
       case (None, Some(weight))           =>
         Cache.expireAfterAccess[F, K, Nothing, Entry[F, V]](
           name,
@@ -155,22 +168,24 @@ object RangeCache {
           weight,
           (_: Entry[F, V]).state.size,
           metrics
-        )
+        )(S, F)
       case (None, None)                   =>
-        Cache.expireAfterAccess[F, K, Nothing, Entry[F, V]](name, config.expireAfterAccess.get, None, metrics)
+        Cache.expireAfterAccess[F, K, Nothing, Entry[F, V]](name, config.expireAfterAccess.get, None, metrics)(S, F)
     }
     for {
       underlying <- cache
       gate       <- Resource.eval(Semaphore[F](1))
-    } yield implementation(underlying, gate, config, SpecificCacheMetrics[F]("range_cache", name, metrics))
+    } yield implementation(underlying, gate, config, SpecificCacheMetrics[F]("range_cache", name, metrics), S)
   }
 
-  private def implementation[F[_]: Async, K, V](
+  private def implementation[F[_], K, V](
     cache:          Cache[F, K, Nothing, Entry[F, V]],
     invalidateLock: Semaphore[F],
     config:         Config,
-    metrics:        SpecificCacheMetrics[F]
-  )(implicit order: Ordering[Instant]): RangeCache[F, K, V] = new RangeCache[F, K, V] {
+    metrics:        SpecificCacheMetrics[F],
+    S:              Sync[F]
+  )(implicit F: Concurrent[F], order: Ordering[Instant]): RangeCache[F, K, V] = new RangeCache[F, K, V] {
+    private implicit val deferred: Defer[F]   = S
     private val asc                           = order.lt(Instant.MIN, Instant.MAX)
     private val ordering: Ordering[TimeRange] = new Ordering[TimeRange] {
       private val delegate                                  = if (asc) TimeRange.ordering else TimeRange.ordering.reverse
@@ -185,14 +200,14 @@ object RangeCache {
       val marker   = new BusinessLoadFailure
       val canceled = new CanceledLoad
       trimmed(requested) { range =>
-        Stream.eval((cache.get(key).flatMap(_.traverse(clean)), Async[F].realTimeInstant).tupled).flatMap {
+        Stream.eval((cache.get(key).flatMap(_.traverse(clean)), S.realTimeInstant).tupled).flatMap {
           case (Some(entry), now) if gaps(entry.state, range, now).isEmpty =>
             Stream.eval(metrics.hit(locked = false)) >> values[E](entry.state.values(range).values.flatten)
           case _                                                           =>
             Stream.resource(locked(key)).flatMap { entry =>
               // Child finalizers must finish before the key permit is released.
               Stream.resource(Supervisor[F](await = false)).flatMap { supervisor =>
-                Stream.eval(Async[F].realTimeInstant).flatMap { now =>
+                Stream.eval(S.realTimeInstant).flatMap { now =>
                   gaps(entry.state, range, now) match {
                     case Nil     =>
                       Stream.eval(metrics.hit(locked = true)) >> values[E](entry.state.values(range).values.flatten)
@@ -204,19 +219,19 @@ object RangeCache {
                       // Reapply gaps after intervals so an interval cannot replace a consuming gap.
                       val parts                                                    = withData ++ missing.map(_ -> None)
                       def load(part: (TimeRange, Option[Iterable[V]])): F[Part[V]] = part match {
-                        case (_, Some(data)) => Async[F].pure(Cached(data))
+                        case (_, Some(data)) => F.pure(Cached(data))
                         case (gap, None)     =>
-                          supervisor.supervise(Async[F].defer(fill(gap))).flatMap(_.join).flatMap {
+                          supervisor.supervise(S.defer(fill(gap))).flatMap(_.join).flatMap {
                             case Outcome.Succeeded(result) =>
                               result.flatMap {
-                                case Right(data) => Async[F].pure(Loaded(gap, data))
-                                case Left(error) => loadFailure.complete(Right(error)) *> Async[F].never[Part[V]]
+                                case Right(data) => F.pure(Loaded(gap, data))
+                                case Left(error) => loadFailure.complete(Right(error)) *> F.never[Part[V]]
                               }
                             // An independent interrupt signal bypasses parEvalMap's ordered result queue.
                             // The watcher is the only failure source; it cancels this waiting worker as well.
-                            case Outcome.Errored(error)    => loadFailure.complete(Left(error)) *> Async[F].never[Part[V]]
+                            case Outcome.Errored(error)    => loadFailure.complete(Left(error)) *> F.never[Part[V]]
                             // Canceling the worker's join externally does not enter this branch.
-                            case Outcome.Canceled()        => loadFailure.complete(Left(canceled)) *> Async[F].never[Part[V]]
+                            case Outcome.Canceled()        => loadFailure.complete(Left(canceled)) *> F.never[Part[V]]
                           }
                       }
                       val source                                                   = Stream.emits(parts.toList).covary[F]
@@ -227,14 +242,14 @@ object RangeCache {
                       Stream.eval(metrics.load) >> loaded
                         .evalMapAccumulate(entry) { (previous, result) =>
                           result match {
-                            case Cached(data)            => Async[F].pure(previous -> data)
+                            case Cached(data)            => F.pure(previous -> data)
                             case Loaded(gap, Some(data)) =>
                               val updated = previous.add(gap, data)
                               commit(key, previous, updated).map { committed =>
                                 // The caller that started before invalidation still receives its loaded data.
                                 committed -> updated.state.values(gap).values.flatten
                               }
-                            case Loaded(_, None)         => Async[F].pure(previous -> Iterable.empty[V])
+                            case Loaded(_, None)         => F.pure(previous -> Iterable.empty[V])
                           }
                         }
                         .map(_._2)
@@ -248,7 +263,7 @@ object RangeCache {
         case Left(error) => Left(error): Either[Throwable, Unit]
         case Right(_)    => Left(marker): Either[Throwable, Unit]
       }).handleErrorWith {
-        case error if error eq canceled => Stream.eval(Async[F].canceled *> Async[F].never[Either[E, V]])
+        case error if error eq canceled => Stream.eval(F.canceled *> F.never[Either[E, V]])
         case error if error eq marker   =>
           Stream.eval(loadFailure.get).flatMap {
             case Right(error) => Stream.emit(Left(error): Either[E, V])
@@ -264,16 +279,16 @@ object RangeCache {
     override def invalidate(key: K, from: Instant): F[Unit] =
       invalidateLock.permit.use { _ =>
         cache.get(key).flatMap {
-          case None        => Async[F].unit
+          case None        => F.unit
           case Some(entry) =>
             // Never wait for a loader while holding the invalidation gate.
-            Resource.make(entry.lock.tryAcquire)(acquired => if (acquired) entry.lock.release else Async[F].unit).use {
+            Resource.make(entry.lock.tryAcquire)(acquired => if (acquired) entry.lock.release else F.unit).use {
               acquired =>
                 entry.markStale(from) *> (if (acquired)
                                             clean(entry).flatMap(fresh =>
                                               if (fresh.state.isEmpty) cache.invalidate(key) else cache.put(key, fresh)
                                             )
-                                          else Async[F].unit)
+                                          else F.unit)
             }
         }
       }
@@ -286,7 +301,7 @@ object RangeCache {
       Stream.emits(data.toList).map(value => Right(value): Either[E, V])
 
     private def trimmed[A](range: TimeRange)(f: TimeRange => Stream[F, A]): Stream[F, A] =
-      Stream.eval(Async[F].realTimeInstant).flatMap { now =>
+      Stream.eval(S.realTimeInstant).flatMap { now =>
         if (config.trimToNow && range.end.isAfter(now))
           TimeRange.makeOption(range.start, now).fold[Stream[F, A]](Stream.empty)(f)
         else f(range)
@@ -346,13 +361,13 @@ object RangeCache {
                       Ref
                         .of[F, Instant](Instant.MAX)
                         .map[Option[Entry[F, V]]](stale => Some(Entry(RangeMap.empty[V], original.lock, stale)))
-                    case _                                              => Async[F].pure(Option.empty[Entry[F, V]])
+                    case _                                              => F.pure(Option.empty[Entry[F, V]])
                   }
                 }
                 .onError { case _ => original.lock.release }
                 .flatMap {
-                  case Some(fresh) => Async[F].pure(fresh -> original.lock)
-                  case None        => original.lock.release *> poll(Async[F].cede) *> Async[F].defer(acquire)
+                  case Some(fresh) => F.pure(fresh -> original.lock)
+                  case None        => original.lock.release *> poll(F.cede) *> S.defer(acquire)
                 }
             }
           acquire
@@ -369,7 +384,7 @@ object RangeCache {
         clean(updated).flatTap { fresh =>
           cache.get(key).flatMap {
             case Some(current) if current eq previous => cache.put(key, fresh)
-            case _                                    => Async[F].unit
+            case _                                    => F.unit
           }
         }
       }

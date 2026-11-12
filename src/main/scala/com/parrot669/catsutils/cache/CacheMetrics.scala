@@ -5,6 +5,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import scala.jdk.CollectionConverters._
 
+import cats.Applicative
+import cats.effect.Sync
+
 import io.micrometer.core.instrument.{Gauge, MeterRegistry, Tag}
 
 /** Explicit metric destination and request-path context. The caller owns the registry. */
@@ -27,13 +30,13 @@ object CacheMetrics {
     }
   }
 
-  def noop[F[_]: cats.Applicative]: CacheMetrics[F] = new CacheMetrics[F] {
-    def path: F[String] = cats.Applicative[F].pure("")
-    def increment(name: String, tags: Map[String, String]): F[Unit] = cats.Applicative[F].unit
-    def gauge(name:     String, tags: Map[String, String], value: Double): F[Unit] = cats.Applicative[F].unit
+  def noop[F[_]: Applicative]: CacheMetrics[F] = new CacheMetrics[F] {
+    def path: F[String] = Applicative[F].pure("")
+    def increment(name: String, tags: Map[String, String]): F[Unit] = Applicative[F].unit
+    def gauge(name:     String, tags: Map[String, String], value: Double): F[Unit] = Applicative[F].unit
   }
 
-  def micrometer[F[_]: cats.effect.Sync](registry: MeterRegistry, context: CacheMetricContext[F]): CacheMetrics[F] =
+  def micrometer[F[_]: Sync](registry: MeterRegistry, context: CacheMetricContext[F]): CacheMetrics[F] =
     new CacheMetrics[F] {
       private def gauges = gaugesFor(registry)
 
@@ -43,9 +46,9 @@ object CacheMetrics {
         tags.toList.sortBy(_._1).map { case (key, value) => Tag.of(key, value) }.asJava
 
       def increment(name: String, tags: Map[String, String]): F[Unit] =
-        cats.effect.Sync[F].delay(registry.counter(name, labels(tags)).increment())
+        Sync[F].delay(registry.counter(name, labels(tags)).increment())
 
-      def gauge(name: String, tags: Map[String, String], value: Double): F[Unit] = cats.effect.Sync[F].delay {
+      def gauge(name: String, tags: Map[String, String], value: Double): F[Unit] = Sync[F].delay {
         val reference = gauges.computeIfAbsent(
           (name, tags),
           _ => {

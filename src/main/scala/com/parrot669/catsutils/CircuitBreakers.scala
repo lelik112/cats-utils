@@ -6,8 +6,9 @@ import scala.util.control.NoStackTrace
 
 import cats.effect.std.Mutex
 import cats.effect.syntax.all._
-import cats.effect.{Async, Outcome, Ref, Resource}
+import cats.effect.{Concurrent, Outcome, Ref, Resource, Sync}
 import cats.syntax.all._
+import cats.{Applicative, ApplicativeThrow}
 
 import com.parrot669.catsutils.CircuitBreakers.{CircuitBreakerOpen, Guarded}
 import com.parrot669.catsutils.pureconfig.DurationConfigReader
@@ -18,20 +19,20 @@ import com.linecorp.armeria.client.circuitbreaker.{CircuitBreaker, CircuitBreake
 import io.circe.generic.JsonCodec
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 
-abstract class CircuitBreakers[F[_]: cats.MonadThrow] {
+abstract class CircuitBreakers[F[_]: ApplicativeThrow] {
 
   /** The default counts successful effect completion, including a returned Left, as success. An effectful predicate can
     * inspect a successful Outcome's value to classify typed business errors independently from raised errors.
     */
   def guard[A](
-    onOpen: String => F[A] = (_: String) => cats.MonadThrow[F].raiseError[A](CircuitBreakerOpen),
+    onOpen: String => F[A] = (_: String) => ApplicativeThrow[F].raiseError[A](CircuitBreakerOpen),
     isSuccess: Outcome[F, Throwable, A] => F[Boolean] = (outcome: Outcome[F, Throwable, A]) =>
-      cats.MonadThrow[F].pure(outcome.isSuccess)
+      ApplicativeThrow[F].pure(outcome.isSuccess)
   ): Guarded[F, A]
 
   /** Preserves the source's default classification for typed failures represented by Left. */
   def guardEither[E, A](
-    onOpen:    String => F[Either[E, A]] = (_: String) => cats.MonadThrow[F].raiseError[Either[E, A]](CircuitBreakerOpen),
+    onOpen:    String => F[Either[E, A]] = (_: String) => ApplicativeThrow[F].raiseError[Either[E, A]](CircuitBreakerOpen),
     isSuccess: Outcome[F, Throwable, Either[E, A]] => F[Boolean] = CircuitBreakers.eitherIsSuccess[F, E, A] _
   ): Guarded[F, Either[E, A]] = guard(onOpen, isSuccess)
 
@@ -39,9 +40,9 @@ abstract class CircuitBreakers[F[_]: cats.MonadThrow] {
     * use guardEither()(path)(resource.use(...)) to classify typed business errors returned by a Resource use.
     */
   def scoped(
-    onOpen: String => F[Unit] = (_: String) => cats.MonadThrow[F].raiseError[Unit](CircuitBreakerOpen),
+    onOpen: String => F[Unit] = (_: String) => ApplicativeThrow[F].raiseError[Unit](CircuitBreakerOpen),
     isSuccess: Resource.ExitCase => F[Boolean] = (exit: Resource.ExitCase) =>
-      cats.MonadThrow[F].pure(exit == Resource.ExitCase.Succeeded)
+      ApplicativeThrow[F].pure(exit == Resource.ExitCase.Succeeded)
   ): String => Resource[F, Unit]
 }
 
@@ -49,12 +50,12 @@ object CircuitBreakers {
 
   object CircuitBreakerOpen extends RuntimeException("Circuit breaker is open") with NoStackTrace
 
-  private[catsutils] def eitherIsSuccess[F[_]: cats.Applicative, E, A](
+  private[catsutils] def eitherIsSuccess[F[_]: Applicative, E, A](
     outcome: Outcome[F, Throwable, Either[E, A]]
   ): F[Boolean] =
     outcome match {
       case Outcome.Succeeded(value) => value.map(_.isRight)
-      case _                        => cats.Applicative[F].pure(false)
+      case _                        => Applicative[F].pure(false)
     }
 
   @JsonCodec
@@ -85,18 +86,18 @@ object CircuitBreakers {
   }
 
   private object Guarded {
-    def apply[F[_]: Async, A](
+    def apply[F[_]: Sync, A](
       breaker:   String => F[CircuitBreaker],
       onOpen:    String => F[A],
       isSuccess: Outcome[F, Throwable, A] => F[Boolean]
     ): Guarded[F, A] = new Guarded[F, A] {
       override def apply(path: String)(effect: F[A]): F[A] = breaker(path).flatMap { breaker =>
         // Admission and installation of the outcome observer are atomic with respect to cancellation.
-        Async[F].uncancelable { poll =>
-          Async[F].delay(breaker.tryRequest()).flatMap {
+        Sync[F].uncancelable { poll =>
+          Sync[F].delay(breaker.tryRequest()).flatMap {
             case true  =>
-              poll(effect).guaranteeCase(outcome => Async[F].defer(isSuccess(outcome)).flatMap(record(breaker, _)))
-            case false => poll(Async[F].defer(onOpen(path)))
+              poll(effect).guaranteeCase(outcome => Sync[F].defer(isSuccess(outcome)).flatMap(record(breaker, _)))
+            case false => poll(Sync[F].defer(onOpen(path)))
           }
         }
       }
@@ -109,33 +110,44 @@ object CircuitBreakers {
   )
 
   /** The registry remains owned by the caller. */
-  def make[F[_]: Async](
+  def make[F[_]: Sync: Concurrent](
     name:     String,
     config:   F[Config],
     registry: PrometheusMeterRegistry,
     shards:   Int = Runtime.getRuntime.availableProcessors() * 2
   ): F[CircuitBreakers[F]] = make(name, config, registry, CircuitBreaker.builder, shards)
 
-  private[catsutils] def make[F[_]: Async](
+  private[catsutils] def make[F[_]: Sync: Concurrent](
     name:     String,
     config:   F[Config],
     registry: PrometheusMeterRegistry,
     builder:  String => CircuitBreakerBuilder,
     shards:   Int
+  ): F[CircuitBreakers[F]] = makeImpl(name, config, registry, builder, shards, Sync[F])(Concurrent[F])
+
+  private def makeImpl[F[_]](
+    name:     String,
+    config:   F[Config],
+    registry: PrometheusMeterRegistry,
+    builder:  String => CircuitBreakerBuilder,
+    shards:   Int,
+    S:        Sync[F]
+  )(implicit
+    F:        Concurrent[F]
   ): F[CircuitBreakers[F]] = for {
-    _        <- Async[F].raiseWhen(shards <= 0)(new IllegalArgumentException("shards must be positive"))
+    _        <- F.raiseWhen(shards <= 0)(new IllegalArgumentException("shards must be positive"))
     state    <- Vector
                   .fill(shards) {
                     (Ref.of[F, Map[String, (CircuitBreakerConfig, CircuitBreaker)]](Map.empty), Mutex[F])
                       .mapN(Shard.apply)
                   }
                   .sequence
-    listener <- Async[F].delay(CircuitBreakerListener.metricCollecting(registry, name))
+    listener <- S.delay(CircuitBreakerListener.metricCollecting(registry, name))
   } yield new CircuitBreakers[F] {
     override def guard[A](
       onOpen:    String => F[A],
       isSuccess: Outcome[F, Throwable, A] => F[Boolean]
-    ): Guarded[F, A] = Guarded(breaker, onOpen, isSuccess)
+    ): Guarded[F, A] = Guarded(breaker, onOpen, isSuccess)(S)
 
     override def scoped(
       onOpen:    String => F[Unit],
@@ -144,13 +156,13 @@ object CircuitBreakers {
       Resource
         .makeCaseFull[F, Option[CircuitBreaker]] { poll =>
           poll(breaker(path)).flatMap { breaker =>
-            Async[F].delay(breaker.tryRequest()).flatMap {
-              case true  => Async[F].pure(Some(breaker))
-              case false => poll(Async[F].defer(onOpen(path))).as(None)
+            S.delay(breaker.tryRequest()).flatMap {
+              case true  => F.pure(Some(breaker))
+              case false => poll(S.defer(onOpen(path))).as(None)
             }
           }
         } { (admitted, exit) =>
-          admitted.traverse_(breaker => Async[F].defer(isSuccess(exit)).flatMap(record(breaker, _)))
+          admitted.traverse_(breaker => S.defer(isSuccess(exit)).flatMap(record(breaker, _)(S)))
         }
         .void
 
@@ -158,12 +170,12 @@ object CircuitBreakers {
       val shard = state(Math.floorMod(path.hashCode, shards))
       // Building a breaker installs listeners, so keep that side effect outside Ref.modify's retryable function.
       shard.mutex.lock.surround {
-        Async[F].uncancelable { _ =>
+        F.uncancelable { _ =>
           shard.state.get.flatMap { breakers =>
             breakers.get(path) match {
-              case Some((`currentConfig`, breaker)) => Async[F].pure(breaker)
+              case Some((`currentConfig`, breaker)) => F.pure(breaker)
               case _                                =>
-                Async[F]
+                S
                   .delay {
                     builder(path)
                       .failureRateThreshold(currentConfig.failureRate)
@@ -181,8 +193,8 @@ object CircuitBreakers {
     }
   }
 
-  private def record[F[_]: cats.effect.Sync](breaker: CircuitBreaker, successful: Boolean): F[Unit] =
-    cats.effect.Sync[F].delay {
+  private def record[F[_]: Sync](breaker: CircuitBreaker, successful: Boolean): F[Unit] =
+    Sync[F].delay {
       if (successful) breaker.onSuccess()
       else breaker.onFailure()
     }

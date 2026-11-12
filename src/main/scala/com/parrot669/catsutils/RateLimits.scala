@@ -4,8 +4,9 @@ package com.parrot669.catsutils
 import java.time.Duration
 
 import cats.effect.syntax.all._
-import cats.effect.{Async, Ref, Resource, Temporal}
+import cats.effect.{Clock, Ref, Resource, Sync, Temporal}
 import cats.syntax.all._
+import cats.{Defer, MonadThrow}
 
 import com.parrot669.catsutils.cache.{Cache, CacheMetrics}
 import com.parrot669.catsutils.pureconfig.DurationConfigReader
@@ -48,17 +49,23 @@ object RateLimits {
     implicit val reader: ConfigReader[Config] = deriveReader
   }
 
-  def make[F[_]: Async](config: F[Config]): Resource[F, RateLimits[F]] =
-    make(config, CacheMetrics.noop[F])
+  def make[F[_]: Sync: Temporal](config: F[Config]): Resource[F, RateLimits[F]] =
+    make(config, CacheMetrics.noop[F](Temporal[F]))
 
-  def make[F[_]: Async](config: F[Config], metrics: CacheMetrics[F]): Resource[F, RateLimits[F]] =
+  def make[F[_]: Sync: Temporal](config: F[Config], metrics: CacheMetrics[F]): Resource[F, RateLimits[F]] =
+    makeImpl(config, metrics, Sync[F])(Temporal[F])
+
+  private def makeImpl[F[_]](config: F[Config], metrics: CacheMetrics[F], S: Sync[F])(implicit
+    F: Temporal[F]
+  ): Resource[F, RateLimits[F]] = {
+    implicit val deferred: Defer[F] = S
     for {
       observations <- Resource.eval(OrderedConfig.make(config))
       cache        <- Cache.expireAfterAccess[F, (String, String), Nothing, (RateLimitsConfig, TokenBucket[F])](
                         "Rate Limits",
                         Expiration,
                         metrics = metrics
-                      )
+                      )(S, F)
     } yield new RateLimits[F] {
       override def apply(id: String, path: String): F[Boolean] = observations.use { latest =>
         val currentConfig = latest(id, path)
@@ -79,6 +86,8 @@ object RateLimits {
       }
     }
 
+  }
+
   trait TokenBucket[F[_]] {
     def take: F[Boolean]
   }
@@ -90,13 +99,13 @@ object RateLimits {
   // https://github.com/http4s/http4s/blob/series/0.23/server/shared/src/main/scala/org/http4s/server/middleware/Throttle.scala#L54
   object TokenBucket {
     // The source accepts a zero refill interval; only negative intervals are rejected.
-    def make[F[_]: Temporal](capacity: Int, refillEvery: Duration): F[TokenBucket[F]] = for {
-      _       <- Temporal[F].raiseWhen(capacity <= 0)(new IllegalArgumentException("capacity must be positive"))
-      _       <- Temporal[F].raiseWhen(refillEvery.isNegative)(new IllegalArgumentException("refillEvery must be positive"))
-      now     <- Temporal[F].monotonic.map(_.toNanos)
+    def make[F[_]: MonadThrow: Clock: Ref.Make](capacity: Int, refillEvery: Duration): F[TokenBucket[F]] = for {
+      _       <- MonadThrow[F].raiseWhen(capacity <= 0)(new IllegalArgumentException("capacity must be positive"))
+      _       <- MonadThrow[F].raiseWhen(refillEvery.isNegative)(new IllegalArgumentException("refillEvery must be positive"))
+      now     <- Clock[F].monotonic.map(_.toNanos)
       counter <- Ref.of[F, (Double, Long)](capacity.toDouble -> now)
     } yield new TokenBucket[F] {
-      override val take: F[Boolean] = Temporal[F].monotonic.map(_.toNanos).flatMap { now =>
+      override val take: F[Boolean] = Clock[F].monotonic.map(_.toNanos).flatMap { now =>
         counter.modify {
           case (tokens, time) if now > time =>
             val diff  = Math.max(0, now - time)

@@ -1,8 +1,9 @@
 package com.parrot669.catsutils
 
+import cats.Defer
 import cats.effect.std.Mutex
 import cats.effect.syntax.all._
-import cats.effect.{Async, Ref}
+import cats.effect.{Concurrent, Ref}
 import cats.syntax.all._
 
 /** Orders successful configuration observations by the start of their reads, not their completion.
@@ -12,7 +13,7 @@ import cats.syntax.all._
   * are not external configuration revisions: a source requiring true revision ordering must expose
   * those revisions explicitly rather than relying on arbitrary effect completion order.
   */
-private[catsutils] final class OrderedConfig[F[_]: Async, C] private (
+private[catsutils] final class OrderedConfig[F[_]: Concurrent: Defer, C] private (
   source:   F[C],
   tickets:  Ref[F, BigInt],
   accepted: Ref[F, Option[(BigInt, C)]],
@@ -27,20 +28,20 @@ private[catsutils] final class OrderedConfig[F[_]: Async, C] private (
     ticket   <- tickets.getAndUpdate(_ + 1)
     snapshot <- source
     result   <- mutex.lock.surround {
-                  Async[F].uncancelable { _ =>
+                  Concurrent[F].uncancelable { _ =>
                     accepted
                       .modify {
                         case previous @ Some((sequence, value)) if sequence >= ticket => (previous, value)
                         case _                                                        => (Some(ticket -> snapshot), snapshot)
                       }
-                      .flatMap(value => Async[F].defer(f(value)))
+                      .flatMap(value => Defer[F].defer(f(value)))
                   }
                 }
   } yield result
 }
 
 private[catsutils] object OrderedConfig {
-  def make[F[_]: Async, C](source: F[C]): F[OrderedConfig[F, C]] =
+  def make[F[_]: Concurrent: Defer, C](source: F[C]): F[OrderedConfig[F, C]] =
     (Ref.of[F, BigInt](BigInt(0)), Ref.of[F, Option[(BigInt, C)]](None), Mutex[F])
       .mapN(new OrderedConfig(source, _, _, _))
 }

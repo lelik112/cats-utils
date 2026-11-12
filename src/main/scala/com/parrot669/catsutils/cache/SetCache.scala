@@ -5,10 +5,11 @@ import java.time.Duration
 
 import cats.effect.std.Semaphore
 import cats.effect.syntax.all._
-import cats.effect.{Async, Resource}
+import cats.effect.{Concurrent, Resource, Sync, Temporal}
 import cats.syntax.all._
+import cats.{Defer, Functor}
 
-abstract class SetCache[F[_]: cats.Functor, K1, K2, V] {
+abstract class SetCache[F[_]: Functor, K1, K2, V] {
   final def getOrUpdate(key: K1, keys: Set[K2])(fill: Set[K2] => F[Map[K2, V]]): F[Map[K2, V]] =
     getOrUpdateOption(key, keys)(missing => fill(missing).map(value => Some(value)))
 
@@ -37,20 +38,22 @@ object SetCache {
   private final case class Entry[F[_], K, V](state: Map[K, Option[V]], lock: Semaphore[F], weight: Int = 0)
 
   private object Entry {
-    def empty[F[_]: Async, K, V]: F[Entry[F, K, V]] = Semaphore[F](1).map(Entry(Map.empty[K, Option[V]], _))
+    def empty[F[_]: Concurrent, K, V]: F[Entry[F, K, V]] = Semaphore[F](1).map(Entry(Map.empty[K, Option[V]], _))
   }
 
-  private def make[F[_]: Async, K1, K2, V](
+  private def make[F[_], K1, K2, V](
     cache:          Cache[F, K1, Nothing, Entry[F, K2, V]],
     invalidateLock: Semaphore[F],
     cacheEmptyKeys: Boolean,
     metrics:        SpecificCacheMetrics[F],
-    weigh:          Map[K2, Option[V]] => Option[Int]
-  ): SetCache[F, K1, K2, V] = new SetCache[F, K1, K2, V] {
+    weigh:          Map[K2, Option[V]] => Option[Int],
+    S:              Sync[F]
+  )(implicit F: Concurrent[F]): SetCache[F, K1, K2, V] = new SetCache[F, K1, K2, V] {
+    private implicit val deferred: Defer[F] = S
     override def getOrUpdateOptionEither[E](key: K1, keys: Set[K2])(
       fill: Set[K2] => F[Either[E, Option[Map[K2, V]]]]
     ): F[Either[E, Map[K2, V]]] =
-      if (keys.isEmpty) Async[F].pure(Right(Map.empty))
+      if (keys.isEmpty) F.pure(Right(Map.empty))
       else
         cache
           .get(key)
@@ -63,7 +66,7 @@ object SetCache {
                 if (missing.isEmpty)
                   metrics.hit(locked = true).as(Right(state): Either[E, Map[K2, Option[V]]])
                 else
-                  metrics.load *> Async[F]
+                  metrics.load *> S
                     .defer(fill(missing))
                     .map(_.map {
                       case None           => state
@@ -79,8 +82,8 @@ object SetCache {
           .map(_.map(_.collect { case (k, Some(v)) if keys(k) => k -> v }))
 
     override def put(key: K1, values: Map[K2, V]): F[Unit] =
-      if (values.isEmpty) Async[F].unit
-      else update[Nothing](key)(state => Async[F].pure(Right(state ++ values.map { case (k, v) => k -> Some(v) }))).void
+      if (values.isEmpty) F.unit
+      else update[Nothing](key)(state => F.pure(Right(state ++ values.map { case (k, v) => k -> Some(v) }))).void
 
     override def invalidate(key: K1): F[Unit] =
       invalidateLock.permit.use(_ => cache.invalidate(key))
@@ -97,7 +100,7 @@ object SetCache {
             // A detached empty entry serves this request; the identity check below prevents caching it.
             cache.get(key).map(_.getOrElse(original.copy(state = Map.empty[K2, Option[V]]))).flatMap {
               case entry if entry.lock eq original.lock =>
-                Async[F]
+                S
                   .defer(f(entry.state))
                   .flatTap {
                     case Right(result) =>
@@ -105,25 +108,25 @@ object SetCache {
                         cache.get(key).flatMap {
                           // An invalidation or eviction must not let an old loader resurrect the entry.
                           case Some(current) if current eq entry =>
-                            Async[F].delay(weigh(result)).flatMap {
+                            S.delay(weigh(result)).flatMap {
                               case Some(weight) => cache.put(key, entry.copy(state = result, weight = weight))
                               // Caffeine accepts only Int entry weights. Return an unrepresentable
                               // result to this caller without retaining any part of the new entry.
                               case None         => cache.invalidate(key)
                             }
-                          case _                                 => Async[F].unit
+                          case _                                 => F.unit
                         }
                       }
-                    case Left(_)       => Async[F].unit
+                    case Left(_)       => F.unit
                   }
                   .map[Option[Either[E, Map[K2, Option[V]]]]](value => Some(value))
-              case _                                    => Async[F].pure(Option.empty[Either[E, Map[K2, Option[V]]]])
+              case _                                    => F.pure(Option.empty[Either[E, Map[K2, Option[V]]]])
             }
           }
           .flatMap {
-            case Some(result) => Async[F].pure(result)
+            case Some(result) => F.pure(result)
             // Release the obsolete lock before retrying against the replacement entry.
-            case None         => Async[F].defer(update(key)(f))
+            case None         => S.defer(update(key)(f))
           }
       }
   }
@@ -137,13 +140,14 @@ object SetCache {
     Option.when(total <= Int.MaxValue)(total.toInt)
   }
 
-  private def build[F[_]: Async, K1, K2, V](
+  private def build[F[_], K1, K2, V](
     cache:          Resource[F, Cache[F, K1, Nothing, Entry[F, K2, V]]],
     name:           String,
     cacheEmptyKeys: Boolean,
     metrics:        CacheMetrics[F],
+    S:              Sync[F],
     size:           Option[V => Int] = None
-  ): Resource[F, SetCache[F, K1, K2, V]] =
+  )(implicit F: Concurrent[F]): Resource[F, SetCache[F, K1, K2, V]] =
     for {
       underlying <- cache
       gate       <- Resource.eval(Semaphore[F](1))
@@ -152,24 +156,25 @@ object SetCache {
       gate,
       cacheEmptyKeys,
       SpecificCacheMetrics[F]("set_cache", name, metrics),
-      size.fold[Map[K2, Option[V]] => Option[Int]](_ => Some(0))(weigher[K2, V])
+      size.fold[Map[K2, Option[V]] => Option[Int]](_ => Some(0))(weigher[K2, V]),
+      S
     )
 
-  def expireAfterWrite[F[_]: Async, K1, K2, V](
+  def expireAfterWrite[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     cacheEmptyKeys: Boolean
   ): Resource[F, SetCache[F, K1, K2, V]] =
-    expireAfterWrite(name, expiration, cacheEmptyKeys, CacheMetrics.noop[F])
+    expireAfterWrite(name, expiration, cacheEmptyKeys, CacheMetrics.noop[F](Temporal[F]))
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     cacheEmptyKeys: Boolean
   ): Resource[F, SetCache[F, K1, K2, V]] =
-    expireAfterAccess(name, expiration, None, cacheEmptyKeys, CacheMetrics.noop[F])
+    expireAfterAccess(name, expiration, None, cacheEmptyKeys, CacheMetrics.noop[F](Temporal[F]))
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     cacheEmptyKeys: Boolean,
@@ -177,15 +182,15 @@ object SetCache {
   ): Resource[F, SetCache[F, K1, K2, V]] =
     expireAfterAccess(name, expiration, None, cacheEmptyKeys, metrics)
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     refresh:        Option[Duration],
     cacheEmptyKeys: Boolean
   ): Resource[F, SetCache[F, K1, K2, V]] =
-    expireAfterAccess(name, expiration, refresh, cacheEmptyKeys, CacheMetrics.noop[F])
+    expireAfterAccess(name, expiration, refresh, cacheEmptyKeys, CacheMetrics.noop[F](Temporal[F]))
 
-  def expireAfterWrite[F[_]: Async, K1, K2, V](
+  def expireAfterWrite[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     cacheEmptyKeys: Boolean,
@@ -195,19 +200,20 @@ object SetCache {
       Cache.expireAfterWrite[F, K1, Nothing, Entry[F, K2, V]](name, expiration, metrics),
       name,
       cacheEmptyKeys,
-      metrics
-    )
+      metrics,
+      Sync[F]
+    )(Temporal[F])
 
-  def expireAfterWrite[F[_]: Async, K1, K2, V](
+  def expireAfterWrite[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     size:           V => Int,
     maxWeight:      Long,
     cacheEmptyKeys: Boolean
   ): Resource[F, SetCache[F, K1, K2, V]] =
-    expireAfterWrite(name, expiration, size, maxWeight, cacheEmptyKeys, CacheMetrics.noop[F])
+    expireAfterWrite(name, expiration, size, maxWeight, cacheEmptyKeys, CacheMetrics.noop[F](Temporal[F]))
 
-  def expireAfterWrite[F[_]: Async, K1, K2, V](
+  def expireAfterWrite[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     size:           V => Int,
@@ -226,10 +232,11 @@ object SetCache {
       name,
       cacheEmptyKeys,
       metrics,
+      Sync[F],
       Some(size)
-    )
+    )(Temporal[F])
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     refresh:        Option[Duration],
@@ -240,10 +247,11 @@ object SetCache {
       Cache.expireAfterAccess[F, K1, Nothing, Entry[F, K2, V]](name, expiration, refresh, metrics),
       name,
       cacheEmptyKeys,
-      metrics
-    )
+      metrics,
+      Sync[F]
+    )(Temporal[F])
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     refresh:        Option[Duration],
@@ -251,9 +259,9 @@ object SetCache {
     maxWeight:      Long,
     cacheEmptyKeys: Boolean
   ): Resource[F, SetCache[F, K1, K2, V]] =
-    expireAfterAccess(name, expiration, refresh, size, maxWeight, cacheEmptyKeys, CacheMetrics.noop[F])
+    expireAfterAccess(name, expiration, refresh, size, maxWeight, cacheEmptyKeys, CacheMetrics.noop[F](Temporal[F]))
 
-  def expireAfterAccess[F[_]: Async, K1, K2, V](
+  def expireAfterAccess[F[_]: Sync: Temporal, K1, K2, V](
     name:           String,
     expiration:     Duration,
     refresh:        Option[Duration],
@@ -274,6 +282,7 @@ object SetCache {
       name,
       cacheEmptyKeys,
       metrics,
+      Sync[F],
       Some(size)
-    )
+    )(Temporal[F])
 }

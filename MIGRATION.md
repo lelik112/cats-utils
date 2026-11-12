@@ -26,6 +26,12 @@ still runs only when the effect runs. `CacheMetricContext.create` is replaced by
 For IO, allocate `IOLocal("")` in the application and pass `.asLocal`. For `Kleisli`, use its
 Local instance. A shared mutable `Ref` is not a replacement for fiber-local context.
 
+Cache and limiter factories take separate `Sync[F]` and `Temporal[F]` evidence. Circuit-breaker
+factories take `Sync[F]` and `Concurrent[F]`. No `Async[F]` instance is required. If an application
+passes implicit arguments explicitly, update that argument list as well: for example, RangeCache
+construction now takes `Sync[F]`, `Temporal[F]`, then the instant ordering. Normally these are
+inferred. See the README's effect requirements for the weaker supporting and abstract APIs.
+
 This migration deliberately changes source signatures, not cache retention, typed errors,
 configuration ordering, cancellation ownership, or limiter/circuit-breaker policy.
 The original IO tests remain runtime-bound tests; transformer tests verify that the public API
