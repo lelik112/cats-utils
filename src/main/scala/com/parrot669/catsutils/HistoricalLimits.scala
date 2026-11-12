@@ -3,7 +3,8 @@ package com.parrot669.catsutils
 
 import java.time.{Duration, Instant}
 
-import cats.effect.{IO, Resource}
+import cats.effect.syntax.all._
+import cats.effect.{Async, Resource}
 import cats.syntax.all._
 
 import com.parrot669.catsutils.cache.{Cache, CacheMetrics}
@@ -13,8 +14,8 @@ import _root_.pureconfig.ConfigReader
 import _root_.pureconfig.generic.semiauto.deriveReader
 import io.circe.generic.JsonCodec
 
-trait HistoricalLimits {
-  def apply(id: String, path: String, startTime: Instant): IO[Boolean]
+trait HistoricalLimits[F[_]] {
+  def apply(id: String, path: String, startTime: Instant): F[Boolean]
 }
 
 object HistoricalLimits {
@@ -43,34 +44,37 @@ object HistoricalLimits {
     }
   }
 
-  def make(config: IO[Config], metrics: CacheMetrics = CacheMetrics.noop): Resource[IO, HistoricalLimits] =
+  def make[F[_]: Async](config: F[Config]): Resource[F, HistoricalLimits[F]] =
+    make(config, CacheMetrics.noop[F])
+
+  def make[F[_]: Async](config: F[Config], metrics: CacheMetrics[F]): Resource[F, HistoricalLimits[F]] =
     for {
       observations <- Resource.eval(OrderedConfig.make(config))
-      cache        <- Cache.expireAfterAccess[(String, String), Nothing, (LegacyLimitsConfig, RateLimits.TokenBucket)](
+      cache        <- Cache.expireAfterAccess[F, (String, String), Nothing, (LegacyLimitsConfig, RateLimits.TokenBucket[F])](
                         "Legacy Rate Limits",
                         Expiration,
                         metrics = metrics
                       )
-    } yield new HistoricalLimits {
-      override def apply(id: String, path: String, startTime: Instant): IO[Boolean] = observations.use { latest =>
+    } yield new HistoricalLimits[F] {
+      override def apply(id: String, path: String, startTime: Instant): F[Boolean] = observations.use { latest =>
         val currentConfig = latest(path)
         val key           = (id, path)
-        IO.realTimeInstant.flatMap { now =>
+        Async[F].realTimeInstant.flatMap { now =>
           if (startTime.isBefore(now.minus(currentConfig.olderThan)))
             cache
               .getOrUpdateValue(key) {
-                RateLimits.TokenBucket.make(currentConfig.limit, currentConfig.per).map(currentConfig -> _)
+                RateLimits.TokenBucket.make[F](currentConfig.limit, currentConfig.per).map(currentConfig -> _)
               }
               .flatMap {
                 case (previousConfig, bucket) if previousConfig == currentConfig => bucket.take
                 case _                                                           =>
                   // A bad replacement must not discard an existing, possibly exhausted budget.
                   RateLimits.TokenBucket
-                    .make(currentConfig.limit, currentConfig.per)
+                    .make[F](currentConfig.limit, currentConfig.per)
                     .flatTap(bucket => cache.put(key, currentConfig -> bucket))
                     .flatMap(_.take)
               }
-          else IO.pure(true)
+          else Async[F].pure(true)
         }
       }
     }

@@ -124,7 +124,7 @@ class HistoricalLimitsTest extends CatsEffectSuite {
     TestControl.executeEmbed {
       for {
         observations <- Ref.of[IO, Vector[(String, Map[String, String], Double)]](Vector.empty)
-        metrics       = new CacheMetrics {
+        metrics       = new CacheMetrics[IO] {
                           def path: IO[String] = IO.pure("")
                           def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
                           def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] =

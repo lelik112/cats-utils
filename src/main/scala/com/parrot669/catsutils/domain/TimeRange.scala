@@ -5,7 +5,7 @@ package com.parrot669.catsutils.domain
 import java.time.{Duration, Instant, ZoneOffset, ZonedDateTime}
 import scala.reflect.ClassTag
 
-import cats.effect.IO
+import cats.effect.Sync
 
 import io.circe.{Decoder, DecodingFailure, Encoder}
 
@@ -103,12 +103,12 @@ object TimeRange {
   def makeOption(from: Instant, until: Instant): Option[TimeRange] =
     make(from, until).toOption
 
-  /** Invalid ranges fail the IO with RuntimeException; validation remains suspended until execution. */
-  def makeIO(from: ZonedDateTime, until: ZonedDateTime): IO[TimeRange] =
-    IO.defer(IO.fromEither(make(from, until).left.map(new RuntimeException(_))))
+  /** Invalid ranges fail the effect with RuntimeException; validation remains suspended until execution. */
+  def makeF[F[_]: Sync](from: ZonedDateTime, until: ZonedDateTime): F[TimeRange] =
+    Sync[F].defer(Sync[F].fromEither(make(from, until).left.map(new RuntimeException(_))))
 
-  def makeIO(from: Instant, until: Instant): IO[TimeRange] =
-    IO.defer(IO.fromEither(make(from, until).left.map(new RuntimeException(_))))
+  def makeF[F[_]: Sync](from: Instant, until: Instant): F[TimeRange] =
+    Sync[F].defer(Sync[F].fromEither(make(from, until).left.map(new RuntimeException(_))))
 
   implicit val ordering: Ordering[TimeRange] = Ordering.by(range => (range.start, range.end))
 

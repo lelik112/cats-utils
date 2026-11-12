@@ -1,23 +1,27 @@
 // Adapted from owner-supplied utilities attributed to Bobylev (Бобылев); see PROVENANCE.md.
 package com.parrot669.catsutils.cache
 
-import cats.effect.IO
+import cats.syntax.all._
 
-private[cache] trait SpecificCacheMetrics {
-  def hit(locked: Boolean): IO[Unit]
-  def load: IO[Unit]
+private[cache] trait SpecificCacheMetrics[F[_]] {
+  def hit(locked: Boolean): F[Unit]
+  def load: F[Unit]
 }
 
 private[cache] object SpecificCacheMetrics {
-  def apply(specificName: String, cacheName: String, metrics: CacheMetrics = CacheMetrics.noop): SpecificCacheMetrics =
-    new SpecificCacheMetrics {
-      def hit(locked: Boolean): IO[Unit] = metrics.path.flatMap { path =>
+  def apply[F[_]: cats.Monad](
+    specificName: String,
+    cacheName:    String,
+    metrics:      CacheMetrics[F]
+  ): SpecificCacheMetrics[F] =
+    new SpecificCacheMetrics[F] {
+      def hit(locked: Boolean): F[Unit] = metrics.path.flatMap { path =>
         metrics.increment(
           s"${specificName}_hits_total",
           Map("name" -> cacheName, "locked" -> locked.toString, "path" -> path)
         )
       }
-      def load: IO[Unit]                 = metrics.path.flatMap { path =>
+      def load: F[Unit]                 = metrics.path.flatMap { path =>
         metrics.increment(s"${specificName}_loads_total", Map("name" -> cacheName, "path" -> path))
       }
     }

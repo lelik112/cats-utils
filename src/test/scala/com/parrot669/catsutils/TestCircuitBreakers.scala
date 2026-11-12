@@ -7,7 +7,7 @@ import com.linecorp.armeria.client.circuitbreaker.TestCircuitBreakerBuilder
 import io.micrometer.prometheusmetrics.{PrometheusConfig, PrometheusMeterRegistry}
 
 object TestCircuitBreakers {
-  final case class Fixture(breakers: CircuitBreakers, clock: TestCircuitBreakerBuilder.TestClock)
+  final case class Fixture(breakers: CircuitBreakers[IO], clock: TestCircuitBreakerBuilder.TestClock)
 
   def make(config: IO[CircuitBreakers.Config]): Resource[IO, Fixture] = for {
     registry <- Resource.make(IO.delay(new PrometheusMeterRegistry(PrometheusConfig.DEFAULT)))(r => IO.delay(r.close()))

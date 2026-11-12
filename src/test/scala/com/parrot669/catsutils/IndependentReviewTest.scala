@@ -29,7 +29,7 @@ class IndependentReviewTest extends CatsEffectSuite {
           .expireAfterWrite(Duration.ofDays(1))
           .withIgnoreRanges(Duration.ofSeconds(10))
           .withMaxGap(Duration.ofSeconds(split.toLong))
-        RangeCache.make[Int, Int]("review", config)(order).use { cache =>
+        RangeCache.make[IO, Int, Int]("review", config)(implicitly[cats.effect.Async[IO]], order).use { cache =>
           for {
             _      <- cache.put(0, range(a, b), (a until b).map(i => instant(i) -> -i))
             result <- cache.getOrUpdate(0, range(0, 10))(gap =>
@@ -49,7 +49,7 @@ class IndependentReviewTest extends CatsEffectSuite {
   test("SetCache weight must not wrap to zero and retain overweight entries") {
     TestControl.executeEmbed {
       SetCache
-        .expireAfterWrite[Int, Int, Int]("review-overflow", Duration.ofDays(1), (_: Int) => 1073741824, 1L, false)
+        .expireAfterWrite[IO, Int, Int, Int]("review-overflow", Duration.ofDays(1), (_: Int) => 1073741824, 1L, false)
         .use { cache =>
           for {
             calls <- Ref.of[IO, Int](0)
