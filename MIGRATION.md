@@ -104,14 +104,43 @@ requested keys absent when `cacheEmptyKeys` is enabled; `None` means do not cach
 Business failures and raised exceptions leave existing state intact. Extra keys returned by a loader
 may be retained as in the source but are not returned unless requested.
 
-Weighted SetCache entries validate every individual weight as nonnegative and sum with checked
-Long arithmetic. Caffeine requires an Int per-entry weight: an aggregate greater than Int.MaxValue
-is returned successfully to the current caller but is not retained, even if the configured total
-maxWeight is larger. An oversized merged put removes the entire aggregate. Negative or throwing
-weighers fail the operation and preserve the previous valid state. Each value is weighed once per
-publication; Caffeine reads the precomputed weight. Generation creation shares the commit gate so
-an old oversized result cannot invalidate a replacement created during its weight calculation.
-This deliberately fixes the source's unchecked Int sum, which could wrap a positive weight to zero.
+Stage B deliberately changes SetCache factories and storage semantics:
+
+- Previously unbounded factories now require `maxWeight` immediately before `cacheEmptyKeys`.
+  Weighted signatures retain `size, maxWeight, cacheEmptyKeys`. Metrics remain the final argument.
+  All factories keep `Sync[F]` + `Temporal[F]`; the abstract API still needs only `Functor[F]`.
+- Every retained K2 has independent write/access timestamps. Successful fill/put ages only new or
+  overwritten values. An extra returned key is a write too. Empty put is a no-op. Positive and
+  negative entries use the same policy, and equality at an expiry boundary is a miss.
+- Access hits now obtain the group permit and may wait for a fill. They touch only requested live
+  cells at selection time. A successful slow response can include earlier selected hits; retention
+  prunes expired cells at publication, and a failed/canceled operation publishes no touch.
+  Optional `refresh` is each cell's maximum write age. It is not background refresh.
+- Group expiry/admission still governs physical lifetime. Lost generations are not recreated by
+  late completions; TTL is a maximum permitted age, not a minimum retention guarantee. Same-group
+  fills and puts stay serialized, different-group loaders remain parallel, and invalidate does not
+  wait for the user loader. Creation, final publication and oversized removal share the commit gate.
+- Negative entries and present zero-size values now cost one unit instead of zero. Unit-cost factories
+  charge one per cell. Empty resident groups and placeholders also cost one. The shared budget bounds
+  charged retained state with whole-K1 eviction, not per-ID LRU and not instantaneous total JVM memory.
+  Temporary results, waiting callers and detached generations are outside it.
+- `maxWeight=0` retains nothing, replacing the former zero-weight negative-retention behavior.
+  Negative capacity/durations and durations not representable in nanoseconds fail effectful allocation.
+  There is no hidden `Long.MaxValue` default or provider-specific capacity choice.
+
+New positive values are weighed once before their publication; touches reuse stored charges. Every
+member is validated even after the aggregate exceeds Int.MaxValue. Negative/throwing weighers leave
+previous valid state intact. Sums use checked Long arithmetic. Caffeine requires an Int entry weight:
+a larger aggregate is returned to the caller without retention even with a larger Long budget.
+An oversized merged put removes the whole group. The generation check and removal remain under one
+gate so a stale oversized fill cannot delete a replacement. No second capacity registry is added.
+
+Result/error distinctions remain: empty requests do nothing, `None` does not mark missing keys absent,
+`Some(empty)` can, and partial successful Maps are authoritative when `cacheEmptyKeys=true`. Consumers
+must represent uncertain provider results as failure rather than absent members of a successful Map.
+Left, exception and cancellation never become successful empty or negative entries. Unlike raw Cache,
+SetCache waiters recheck under the permit and may perform their own fill after an error or unretained
+result; they are not promised their predecessor's error. No retries, backoff or HTTP policy is added.
 
 RangeMap keeps its DIET interval algorithm, half-open boundaries and configured instant ordering.
 Ascending/reversed value and gap iteration is tested explicitly; adjacent ranges and duplicates

@@ -16,8 +16,8 @@ An offline build requires those dependencies to be cached already.
 the same PARROT 669 style to sources and examples, run `./run-sbt scalafmtAll scalafmtSbt`.
 `scalafmtSbtCheck` checks build files. No mdoc plugin or runtime is required.
 
-The suite contains **270 tests**: 120 scenarios from the supplied utilities/support reference
-and 150 adaptation or regression scenarios. Tests cover all seven utilities plus TimeRange,
+The Stage A baseline contained **270 tests**: 120 scenarios from the supplied utilities/support reference
+and 150 adaptation or regression scenarios. Stage B adds the focused contract/weight cases described below. Tests cover all seven utilities plus TimeRange,
 configuration parsing and metrics context. Source comments distinguish supplied cases from
 added coverage. Nine effect-polymorphism tests instantiate all effectful public utilities with
 `Kleisli[IO, String, *]`, including loader cancellation, ordered range streams, context isolation
@@ -42,3 +42,23 @@ Test XML is generated under ignored `target/test-reports`. Passing these checks 
 the covered scenarios, not every possible interleaving, input extreme or application integration.
 No local logs, reports, caches, generated documentation or compiled artifacts are tracked.
 `publish / skip` remains enabled; the build does not configure a Maven publication.
+
+## Stage B SetCache regressions
+
+`SetCacheContractTest` uses TestControl's virtual clock for positive/negative write boundaries,
+independent access touches, write-age refresh caps, slow fill publication and selected-hit retention,
+put/empty-put, failure/cancellation without touch, partial/extra-key results, group serialization,
+waiter retry, invalidation, invalid configuration, zero retention, and a sequential reference model.
+`SetCacheWeightTest` retains all Int overflow/negative/throw/stale-generation cases and adds charged
+negative/zero-value/empty-group budgets, zero/one/finite capacity, whole-group behavior and overwrite
+accounting. Deferred-controlled races use no external service. Generic/Kleisli and capability tests
+retain their assertions while passing explicit SetCache capacities.
+
+```sh
+./run-sbt 'testOnly com.parrot669.catsutils.cache.SetCacheTest com.parrot669.catsutils.cache.SetCacheWeightTest com.parrot669.catsutils.cache.SetCacheContractTest com.parrot669.catsutils.EffectPolymorphismTest com.parrot669.catsutils.MinimalCapabilitiesTest'
+```
+
+Run the full library suite as well; unchanged IndependentReviewTest and CacheMetricContextTest remain
+regression inputs. Test source presence is not a run result. Exact executed commands, failures, counts
+and source seals belong in the local validation report; historical Stage A results do not validate
+Stage B. Backend integration and provider/DB/load testing are separate and are not library assertions.

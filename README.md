@@ -85,6 +85,40 @@ Plain `guard[A]()` classifies successful effect completion as success. Both allo
 `Outcome` predicate. `scoped()` returns a `Resource[F, Unit]` and records the resource-use
 `ExitCase`; wrap `resource.use(...)` with `guardEither` when a returned `Left` must count as failure.
 
+## SetCache value lifetime and capacity
+
+Every SetCache factory requires an explicit `maxWeight: Long`, including the unit-cost forms:
+`expireAfterWrite(name, expiration, maxWeight, cacheEmptyKeys)` and
+`expireAfterAccess(name, expiration, refresh, maxWeight, cacheEmptyKeys)` (with optional metrics).
+There is also an access form without `refresh`. Weighted forms keep `size` before `maxWeight`.
+Choose the budget at the consumer; there is no implicit unbounded default. Negative capacity fails
+allocation; zero returns loaded results without retaining positive or negative values.
+
+Expiry is per K2 value, including cached absence. Write TTL starts at successful publication;
+loading B does not renew A. Access TTL touches only requested fresh keys, including negative hits.
+Optional access `refresh` caps each value's age since write; it does not start a background load.
+Equality with a TTL boundary is expired. Invalid negative or non-nanosecond-representable durations
+fail allocation. `put` merges and overwrites only supplied keys; an empty put renews nothing.
+
+Hits are selected after obtaining current state (and the group permit in access mode). A slow fill
+can return a hit selected earlier, but cannot retain it past its own deadline. Access touches use
+selection time and are published only after success; Left, exception or cancellation commits no touch.
+New values get completion/publication time. Access hits may wait for an ongoing same-group fill.
+Physical group expiry or eviction can remove data earlier than its per-value TTL and fences old fills.
+
+Each retained absent value costs 1; each present value costs `max(1, size(value))` after rejecting
+negative size. Without a custom size function, each costs 1. An empty group/placeholder also costs 1.
+The shared budget is charged weight units, not literal heap bytes or a count of groups. Eviction
+removes a whole K1 group; an oversized result is returned without keeping an arbitrary subset.
+Temporary loader results, waiting fibers and caller-held generations are outside this retention budget.
+
+`Right(None)` does not remember missing keys. `Right(Some(empty))` remembers absence only with
+`cacheEmptyKeys=true`. A partial successful Map is authoritative for the requested missing keys:
+unreturned members become negative entries in that mode. Do not encode a provider failure as an
+incomplete successful Map. Extra returned keys are retained and charged, but returned only when requested.
+Left/errors/cancellation remain failures, never negative cache hits. A waiter may run its own fill
+when its predecessor failed or retained nothing; coalescing is per resident generation.
+
 ## Effect requirements and migration
 
 The effect parameter is first: `Cache[F, K, E, V]`, `SetCache[F, K1, K2, V]`,
