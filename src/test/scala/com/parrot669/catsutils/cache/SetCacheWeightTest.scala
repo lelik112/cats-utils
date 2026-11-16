@@ -1,6 +1,7 @@
 package com.parrot669.catsutils.cache
 
 import java.time.Duration
+import scala.concurrent.duration._
 
 import cats.effect.testkit.TestControl
 import cats.effect.{Deferred, IO, Ref, Resource}
@@ -143,6 +144,118 @@ class SetCacheWeightTest extends CatsEffectSuite {
           _       <- release.complete(()) *> old.joinWithNever
           read    <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new AssertionError("replacement invalidated")))
         } yield assertEquals(read, Map(1 -> 1, 2 -> 2))
+      })
+    }
+  }
+
+  List(false, true).foreach { access =>
+    List("negative", "zero", "empty-group").foreach { kind =>
+      test(s"$access: $kind entries share a finite charged budget across groups") {
+        TestControl.executeEmbed {
+          for {
+            gauges  <- Ref.of[IO, Map[String, Double]](Map.empty)
+            metrics  = new CacheMetrics[IO] {
+                         def path: IO[String] = IO.pure("")
+                         def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
+                         def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] =
+                           gauges.update(_.updated(name, value))
+                       }
+            resource = if (access)
+                         SetCache.expireAfterAccess[IO, Int, Int, Int](
+                           "budget",
+                           Duration.ofDays(1),
+                           None,
+                           (_: Int) => 0,
+                           3L,
+                           kind != "empty-group",
+                           metrics
+                         )
+                       else
+                         SetCache.expireAfterWrite[IO, Int, Int, Int](
+                           "budget",
+                           Duration.ofDays(1),
+                           (_: Int) => 0,
+                           3L,
+                           kind != "empty-group",
+                           metrics
+                         )
+            _       <- resource.use { c =>
+                         for {
+                           _        <- (1 to 20).toList.traverse_(g =>
+                                         c.getOrUpdate(g, Set(1))(_ => IO.pure(if (kind == "zero") Map(1 -> 0) else Map.empty))
+                                       )
+                           _        <- IO.sleep(31.seconds)
+                           recorded <- gauges.get
+                         } yield {
+                           assert(recorded("cache_weight") > 0.0)
+                           assert(recorded("cache_weight") <= 3.0)
+                           assert(recorded("cache_size") <= recorded("cache_weight"))
+                           assertEquals(recorded("cache_max_weight"), 3.0)
+                         }
+                       }
+          } yield ()
+        }
+      }
+    }
+
+    List(0L, 1L, 3L).foreach { maximum =>
+      test(s"$access: mixed negative and zero-sized values charge slots; budget=$maximum; whole group only") {
+        val resource =
+          if (access)
+            SetCache.expireAfterAccess[IO, Int, Int, Int](
+              "slots",
+              Duration.ofDays(1),
+              None,
+              (_: Int) => 0,
+              maximum,
+              true
+            )
+          else SetCache.expireAfterWrite[IO, Int, Int, Int]("slots", Duration.ofDays(1), (_: Int) => 0, maximum, true)
+        TestControl.executeEmbed(resource.use { c =>
+          for {
+            _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 0)))
+            asked   <- Ref.of[IO, Set[Int]](Set.empty)
+            read    <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 1, 2 -> 2)))
+            missing <- asked.get
+          } yield {
+            assertEquals(missing, if (maximum < 2) Set(1, 2) else Set.empty[Int])
+            assertEquals(read, if (maximum < 2) Map(1 -> 1, 2 -> 2) else Map(1 -> 0))
+          }
+        })
+      }
+    }
+
+    test(s"$access: overwriting a cell does not double its charged weight") {
+      val resource =
+        if (access)
+          SetCache.expireAfterAccess[IO, Int, Int, Int]("overwrite", Duration.ofDays(1), None, 2L, true)
+        else SetCache.expireAfterWrite[IO, Int, Int, Int]("overwrite", Duration.ofDays(1), 2L, true)
+      TestControl.executeEmbed(resource.use { c =>
+        for {
+          _    <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map.empty))
+          _    <- c.put(0, Map(1 -> 1)) *> c.put(0, Map(1 -> 10))
+          read <- c.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new AssertionError("overcharged overwrite")))
+        } yield assertEquals(read, Map(1 -> 10))
+      })
+    }
+
+    test(s"$access: capacity eviction during an old fill prevents stale publication") {
+      val resource =
+        if (access)
+          SetCache.expireAfterAccess[IO, Int, Int, Int]("eviction", Duration.ofDays(1), None, 1L, true)
+        else SetCache.expireAfterWrite[IO, Int, Int, Int]("eviction", Duration.ofDays(1), 1L, true)
+      TestControl.executeEmbed(resource.use { c =>
+        for {
+          started <- Deferred[IO, Unit]
+          release <- Deferred[IO, Unit]
+          old     <- c.getOrUpdate(0, Set(1))(_ => started.complete(()) *> release.get.as(Map(1 -> 1))).start
+          _       <- started.get
+          // Fill enough other groups to displace the old generation; no particular new victim is assumed.
+          _       <- (1 to 20).toList.traverse_(g => c.put(g, Map(1 -> g)))
+          _       <- c.put(0, Map(1 -> 100))
+          _       <- release.complete(()) *> old.joinWithNever
+          read    <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 200)))
+        } yield assert(read == Map(1 -> 100) || read == Map(1 -> 200))
       })
     }
   }

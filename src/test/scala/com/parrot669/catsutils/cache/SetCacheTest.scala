@@ -13,7 +13,12 @@ import munit.CatsEffectSuite
 
 class SetCacheTest extends CatsEffectSuite {
   private def cache(empty: Boolean = false): Resource[IO, SetCache[IO, String, String, Int]] =
-    SetCache.expireAfterWrite[IO, String, String, Int]("test", Duration.ofMinutes(1), cacheEmptyKeys = empty)
+    SetCache.expireAfterWrite[IO, String, String, Int](
+      "test",
+      Duration.ofMinutes(1),
+      maxWeight = 100L,
+      cacheEmptyKeys = empty
+    )
 
   test("[source] stores and returns values. cacheEmptyKeys = false") {
     TestControl.executeEmbed(cache().use { cache =>
@@ -239,8 +244,8 @@ class SetCacheTest extends CatsEffectSuite {
   }
 
   List(
-    SetCache.expireAfterWrite[IO, String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false),
-    SetCache.expireAfterAccess[IO, String, String, Int]("test", Duration.ZERO, cacheEmptyKeys = false)
+    SetCache.expireAfterWrite[IO, String, String, Int]("test", Duration.ZERO, maxWeight = 100L, cacheEmptyKeys = false),
+    SetCache.expireAfterAccess[IO, String, String, Int]("test", Duration.ZERO, maxWeight = 100L, cacheEmptyKeys = false)
   ).zipWithIndex.foreach { case (resource, index) =>
     test(s"[cats-effect] zero expiration mode $index completes requests without retaining data") {
       TestControl.executeEmbed(resource.use { cache =>
@@ -255,7 +260,7 @@ class SetCacheTest extends CatsEffectSuite {
     }
   }
 
-  test("[cats-effect] zero maximum weight returns loaded values and retains only zero-weight results") {
+  test("[cats-effect] zero maximum weight returns values but retains neither positive nor negative entries") {
     val resource = SetCache.expireAfterWrite[IO, String, String, Int](
       "test",
       Duration.ofMinutes(1),
@@ -269,11 +274,11 @@ class SetCacheTest extends CatsEffectSuite {
         second <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
         _      <- cache.getOrUpdate("empty", Set("missing"))(_ => IO.pure(Map.empty))
         empty  <-
-          cache.getOrUpdate("empty", Set("missing"))(_ => IO.raiseError(new AssertionError("zero-weight result lost")))
+          cache.getOrUpdate("empty", Set("missing"))(_ => IO.pure(Map("missing" -> 3)))
       } yield {
         assertEquals(first, Map("1" -> 1))
         assertEquals(second, Map("1" -> 2))
-        assert(empty.isEmpty)
+        assertEquals(empty, Map("missing" -> 3))
       }
     })
   }
@@ -306,6 +311,7 @@ class SetCacheTest extends CatsEffectSuite {
     val resource = SetCache.expireAfterAccess[IO, String, String, Int](
       "test",
       Duration.ofSeconds(10),
+      maxWeight = 100L,
       cacheEmptyKeys = false
     )
     TestControl.executeEmbed(resource.use { cache =>

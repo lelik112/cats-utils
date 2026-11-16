@@ -33,7 +33,7 @@ class MinimalCapabilitiesTest extends CatsEffectSuite {
     Cache.expireAfterWrite[F, String, Nothing, Int]("minimal-raw", ttl)
 
   private def sets[F[_]: Sync: Temporal]: Resource[F, SetCache[F, String, String, Int]] =
-    SetCache.expireAfterWrite[F, String, String, Int]("minimal-set", ttl, cacheEmptyKeys = true)
+    SetCache.expireAfterWrite[F, String, String, Int]("minimal-set", ttl, maxWeight = 100L, cacheEmptyKeys = true)
 
   private def ranges[F[_]: Sync: Temporal]: Resource[F, RangeCache[F, String, Int]] =
     RangeCache.make[F, String, Int]("minimal-range", RangeCache.Config.expireAfterWrite(ttl))

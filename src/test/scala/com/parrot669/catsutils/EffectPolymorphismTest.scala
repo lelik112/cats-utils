@@ -28,7 +28,8 @@ class EffectPolymorphismTest extends CatsEffectSuite {
   test("Cache and SetCache execute loaders in the caller's Kleisli environment") {
     val program = for {
       raw <- Cache.expireAfterWrite[App, String, String, String]("generic-raw", ttl)
-      set <- SetCache.expireAfterWrite[App, String, Int, String]("generic-set", ttl, cacheEmptyKeys = true)
+      set <-
+        SetCache.expireAfterWrite[App, String, Int, String]("generic-set", ttl, maxWeight = 100L, cacheEmptyKeys = true)
     } yield (raw, set)
     program
       .use { case (raw, set) =>
@@ -184,7 +185,7 @@ class EffectPolymorphismTest extends CatsEffectSuite {
   test("generic convenience loaders preserve failure for null results rather than treating them as absent") {
     val range    = TimeRange.make(from, until).toOption.get
     val services = (
-      SetCache.expireAfterWrite[App, String, Int, String]("null-set", ttl, cacheEmptyKeys = true),
+      SetCache.expireAfterWrite[App, String, Int, String]("null-set", ttl, maxWeight = 100L, cacheEmptyKeys = true),
       RangeCache.make[App, String, String]("null-range", RangeCache.Config.expireAfterWrite(ttl))
     ).tupled
     services
