@@ -4,7 +4,7 @@ import java.time.Duration
 import scala.concurrent.duration._
 
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred,IO,Ref,Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite

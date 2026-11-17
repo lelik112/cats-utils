@@ -112,15 +112,15 @@ class IndependentReviewTest extends CatsEffectSuite {
               .getAndSet(false)
               .flatMap(block => if (block) captured.complete(()) *> release.get.as(snapshot) else IO.pure(snapshot))
           )
-        _         <- RateLimits.make(configRead).use { limits =>
+        _         <- RateLimits.make(configRead, maxKeys = 16).use { limits =>
                        for {
-                         initial    <- limits("user", "path")
+                         initial    <- limits("user", "path").map(_.isAllowed)
                          _          <- blockNext.set(true)
-                         pending    <- limits("user", "path").start
+                         pending    <- limits("user", "path").map(_.isAllowed).start
                          _          <- captured.get
                          _          <- config.set(fresh)
-                         newAllowed <- limits("user", "path")
-                         exhausted  <- limits("user", "path")
+                         newAllowed <- limits("user", "path").map(_.isAllowed)
+                         exhausted  <- limits("user", "path").map(_.isAllowed)
                          _          <- release.complete(())
                          delayed    <- pending.joinWithNever
                        } yield {

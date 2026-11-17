@@ -5,10 +5,8 @@ import java.time.Duration
 import scala.concurrent.duration._
 
 import cats.effect.testkit.TestControl
-import cats.effect.{IO, Ref}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all._
-
-import com.parrot669.catsutils.cache.CacheMetrics
 
 import io.circe.parser.decode
 import io.circe.syntax._
@@ -18,9 +16,15 @@ class RateLimitsTest extends CatsEffectSuite {
   private val testConfig = RateLimits.RateLimitsConfig(limit = 3, per = Duration.ofSeconds(10))
   private val config     = RateLimits.Config(default = testConfig, paths = Map.empty)
 
+  // Synthetic test capacity only; preserve the supplied Boolean assertions through a local adapter.
+  private def make(source: IO[RateLimits.Config]): Resource[IO, (String, String) => IO[Boolean]] =
+    RateLimits.make(source, maxKeys = 16).map { limits => (id: String, path: String) =>
+      limits(id, path).map(_.isAllowed)
+    }
+
   test("limits requests") {
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config)).use { limits =>
+      make(IO.pure(config)).use { limits =>
         for {
           allowed <- limits("test", "test").replicateA(3)
           denied  <- limits("test", "test")
@@ -34,7 +38,7 @@ class RateLimitsTest extends CatsEffectSuite {
 
   test("refills in specified duration") {
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config)).use { limits =>
+      make(IO.pure(config)).use { limits =>
         for {
           _       <- limits("test", "test").replicateA(3)
           _       <- IO.sleep(10.seconds)
@@ -46,7 +50,7 @@ class RateLimitsTest extends CatsEffectSuite {
 
   test("counts users separately") {
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config)).use { limits =>
+      make(IO.pure(config)).use { limits =>
         for {
           _       <- limits("test", "test").replicateA(3)
           allowed <- limits("test2", "test")
@@ -57,7 +61,7 @@ class RateLimitsTest extends CatsEffectSuite {
 
   test("counts paths separately") {
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config)).use { limits =>
+      make(IO.pure(config)).use { limits =>
         for {
           _       <- limits("test", "test").replicateA(3)
           allowed <- limits("test", "test2")
@@ -72,7 +76,7 @@ class RateLimitsTest extends CatsEffectSuite {
     val path        = "/api/v1/items"
     val pathConfig  = testConfig.copy(users = Map(heavyUser -> testConfig.copy(limit = 2, per = Duration.ofSeconds(1))))
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config.copy(paths = Map(path -> pathConfig)))).use { limits =>
+      make(IO.pure(config.copy(paths = Map(path -> pathConfig)))).use { limits =>
         for {
           regularAllowed <- limits(regularUser, path).replicateA(5).map(_.count(identity))
           heavyAllowed   <- limits(heavyUser, path).replicateA(5).map(_.count(identity))
@@ -87,7 +91,7 @@ class RateLimitsTest extends CatsEffectSuite {
   test("changed effective configuration replaces an exhausted bucket") {
     TestControl.executeEmbed {
       Ref.of[IO, RateLimits.Config](config).flatMap { current =>
-        RateLimits.make(current.get).use { limits =>
+        make(current.get).use { limits =>
           for {
             before <- limits("a", "x").replicateA(4)
             _      <- current.set(config.copy(default = testConfig.copy(limit = 1)))
@@ -103,7 +107,7 @@ class RateLimitsTest extends CatsEffectSuite {
 
   test("concurrent calls cannot spend a token twice") {
     TestControl.executeEmbed {
-      RateLimits.make(IO.pure(config)).use { limits =>
+      make(IO.pure(config)).use { limits =>
         List.fill(100)(limits("a", "x")).parSequence.map(results => assertEquals(results.count(identity), 3))
       }
     }
@@ -129,17 +133,9 @@ class RateLimitsTest extends CatsEffectSuite {
     }
   }
 
-  test("zero refill duration retains the source behavior") {
-    TestControl.executeEmbed {
-      for {
-        bucket      <- RateLimits.TokenBucket.make[IO](1, Duration.ZERO)
-        initial     <- bucket.take.replicateA(2)
-        _           <- IO.sleep(1.nanosecond)
-        replenished <- bucket.take
-      } yield {
-        assertEquals(initial, List(true, false))
-        assert(replenished)
-      }
+  test("zero refill duration is rejected before a bucket is allocated") {
+    RateLimits.TokenBucket.make[IO](1, Duration.ZERO).attempt.map { result =>
+      assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
     }
   }
 
@@ -169,29 +165,18 @@ class RateLimitsTest extends CatsEffectSuite {
     assertEquals(loaded, Right(nested))
   }
 
-  test("optional metrics record the named bucket cache and stop after resource release") {
-    TestControl.executeEmbed {
-      for {
-        observations <- Ref.of[IO, Vector[(String, Map[String, String], Double)]](Vector.empty)
-        metrics       = new CacheMetrics[IO] {
-                          def path: IO[String] = IO.pure("")
-                          def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
-                          def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] =
-                            observations.update(_ :+ ((name, tags, value)))
-                        }
-        _            <- RateLimits.make(IO.pure(config), metrics).use { limits =>
-                          limits("a", "x").replicateA_(2) *> IO.sleep(31.seconds)
-                        }
-        atRelease    <- observations.get
-        _            <- IO.sleep(31.seconds)
-        afterRelease <- observations.get
-      } yield {
-        val tags = Map("name" -> "Rate Limits")
-        assert(atRelease.contains(("cache_size", tags, 1.0)))
-        assert(atRelease.contains(("cache_misses_total", tags, 1.0)))
-        assert(atRelease.contains(("cache_hits_total", tags, 1.0)))
-        assertEquals(afterRelease, atRelease)
-      }
+  test("resource release clears storage and a retained handle rejects further calls") {
+    for {
+      allocated        <- RateLimits.make(IO.pure(config), maxKeys = 1).allocated
+      (limits, release) = allocated
+      before           <- limits("a", "x")
+      _                <- release
+      after            <- limits("a", "x").attempt
+      stillClosed      <- limits("new", "x").attempt
+    } yield {
+      assertEquals(before, RateLimits.Allowed)
+      assert(after.left.exists(_.isInstanceOf[IllegalStateException]))
+      assert(stillClosed.left.exists(_.isInstanceOf[IllegalStateException]))
     }
   }
 }

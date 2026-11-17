@@ -36,8 +36,8 @@ object LimiterReloadTest {
     LimiterFixture(
       "RateLimits",
       source =>
-        RateLimits.make(source.map(_.rate)).map { limits => (id: String, path: String, start: Instant) =>
-          limits(id, path)
+        RateLimits.make(source.map(_.rate), maxKeys = 16).map { limits => (id: String, path: String, start: Instant) =>
+          limits(id, path).map(_.isAllowed)
         }
     ),
     LimiterFixture(

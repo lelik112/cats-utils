@@ -4,9 +4,9 @@ package com.parrot669.catsutils.cache
 import java.time.Duration
 
 import cats.effect.std.Semaphore
-import cats.effect.{Concurrent,Resource,Sync,Temporal}
+import cats.effect.{Concurrent, Resource, Sync, Temporal}
 import cats.syntax.all._
-import cats.{Defer,Functor}
+import cats.{Defer, Functor}
 
 abstract class SetCache[F[_]: Functor, K1, K2, V] {
   final def getOrUpdate(key: K1, keys: Set[K2])(fill: Set[K2] => F[Map[K2, V]]): F[Map[K2, V]] =
@@ -200,7 +200,7 @@ object SetCache {
       policy     <- Resource.eval(S.delay {
                       require(maxWeight >= 0, "set cache maximum weight must be nonnegative")
                       Policy(write.map(nanos), access.map(nanos))
-                   })
+                    })
       underlying <- Cache.make[F, K1, Nothing, Entry[F, K2, V]](
                       name,
                       // Write-only cell age begins at fill publication, not empty-group allocation.
