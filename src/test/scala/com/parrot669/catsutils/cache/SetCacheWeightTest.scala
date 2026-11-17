@@ -4,7 +4,7 @@ import java.time.Duration
 import scala.concurrent.duration._
 
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred,IO,Ref,Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -259,4 +259,44 @@ class SetCacheWeightTest extends CatsEffectSuite {
       })
     }
   }
+  List("invalidate", "capacity").foreach { retirement =>
+    List("success", "error", "oversize").foreach { completion =>
+      test(s"write: $retirement replacement survives old $completion after a long fill") {
+        val boom     = new IllegalStateException("old loader")
+        val stale    = if (completion == "oversize") Map(1 -> 99, 2 -> 99) else Map(1 -> 1)
+        val resource = SetCache.expireAfterWrite[IO, Int, Int, Int](
+          "retirement",
+          Duration.ofMinutes(15),
+          (v: Int) => if (v == 99) Int.MaxValue else 1,
+          1L,
+          true
+        )
+        TestControl.executeEmbed(resource.use { c =>
+          for {
+            entered     <- Deferred[IO, Unit]
+            release     <- Deferred[IO, Unit]
+            old         <- c.getOrUpdate(0, Set(1, 2)) { _ =>
+                             entered.complete(()) *> release.get *>
+                               (if (completion == "error") IO.raiseError[Map[Int, Int]](boom) else IO.pure(stale))
+                           }.attempt
+                             .start
+            _           <- entered.get *> IO.sleep(16.minutes)
+            _           <- if (retirement == "invalidate") c.invalidate(0)
+                           else (1 to 20).toList.traverse_(g => c.put(g, Map(1 -> g)))
+            // Completion before release proves a new generation, rather than waiting on the old permit.
+            _           <- c.put(0, Map(1 -> 100)).timeout(1.second)
+            replacement <- c.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("replacement absent")))
+            _           <- release.complete(())
+            result      <- old.joinWithNever
+            retained    <- c.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("replacement removed")))
+          } yield {
+            if (completion == "error") assertEquals(result, Left(boom))
+            else assertEquals(result, Right(stale))
+            assertEquals(replacement, Map(1 -> 100)); assertEquals(retained, replacement)
+          }
+        })
+      }
+    }
+  }
+
 }

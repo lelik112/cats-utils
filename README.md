@@ -104,7 +104,11 @@ Hits are selected after obtaining current state (and the group permit in access 
 can return a hit selected earlier, but cannot retain it past its own deadline. Access touches use
 selection time and are published only after success; Left, exception or cancellation commits no touch.
 New values get completion/publication time. Access hits may wait for an ongoing same-group fill.
-Physical group expiry or eviction can remove data earlier than its per-value TTL and fences old fills.
+Write-only groups have no outer time expiry: even a fill longer than TTL can publish new cells
+with a full completion-based age. Idle expired cells remain physically charged until publication
+prunes them or weighted capacity evicts the group. A same-group miss waits for the active loader
+instead of replacing it solely because time passed. Explicit invalidation and capacity eviction
+still fence old fills. Access-mode group expiry and optional refresh are unchanged.
 
 Each retained absent value costs 1; each present value costs `max(1, size(value))` after rejecting
 negative size. Without a custom size function, each costs 1. An empty group/placeholder also costs 1.

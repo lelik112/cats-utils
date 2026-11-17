@@ -4,7 +4,7 @@ import java.time.Duration
 import scala.concurrent.duration._
 
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred,IO,Ref,Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -19,6 +19,96 @@ class SetCacheContractTest extends CatsEffectSuite {
   ): Resource[IO, SetCache[IO, Int, Int, Int]] =
     if (access) SetCache.expireAfterAccess[IO, Int, Int, Int]("contract", ttl, refresh, maximum, empty)
     else SetCache.expireAfterWrite[IO, Int, Int, Int]("contract", ttl, maximum, empty)
+
+  List(false, true).foreach { negative =>
+    test(s"write: loader16m retains a full15m completion age; negative=$negative") {
+      val resource = SetCache.expireAfterWrite[IO, Int, Int, Int](
+        "long-write",
+        Duration.ofMinutes(15),
+        1536L,
+        true
+      )
+      TestControl.executeEmbed(resource.use { c =>
+        for {
+          calls         <- Ref.of[IO, Int](0)
+          load           = calls.getAndUpdate(_ + 1).flatMap { prior =>
+                             val result = if (negative) Map.empty[Int, Int] else Map(1 -> 10)
+                             if (prior == 0) IO.sleep(16.minutes).as(result) else IO.pure(result)
+                           }
+          start         <- IO.monotonic
+          first         <- c.getOrUpdate(0, Set(1))(_ => load)
+          completed     <- IO.monotonic
+          immediate     <- c.getOrUpdate(0, Set(1))(_ => load)
+          atCompletion  <- calls.get
+          _             <- IO.sleep(14.minutes + 59.seconds)
+          before        <- c.getOrUpdate(0, Set(1))(_ => load)
+          beforeCount   <- calls.get
+          _             <- IO.sleep(1.second)
+          boundary      <- c.getOrUpdate(0, Set(1))(_ => load)
+          boundaryCount <- calls.get
+        } yield {
+          assertEquals(completed - start, 16.minutes)
+          assertEquals(first, if (negative) Map.empty[Int, Int] else Map(1 -> 10))
+          assertEquals(immediate, first); assertEquals(before, first); assertEquals(boundary, first)
+          assertEquals((atCompletion, beforeCount, boundaryCount), (1, 1, 2))
+        }
+      })
+    }
+  }
+
+  test("write: a waiter after TTL waits for the same loader; other groups remain independent") {
+    TestControl.executeEmbed(cache().use { c =>
+      for {
+        entered <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        done    <- Deferred[IO, Unit]
+        owner   <- c.getOrUpdate(0, Set(1))(_ => entered.complete(()) *> release.get.as(Map(1 -> 1))).start
+        _       <- entered.get *> IO.sleep(11.seconds)
+        waiter  <- c.getOrUpdate(0, Set(1))(unexpected).flatTap(_ => done.complete(())).start
+        other   <- c.getOrUpdate(1, Set(1))(_ => IO.pure(Map(1 -> 100)))
+        _       <- IO.sleep(1.nanosecond)
+        pending <- done.tryGet
+        _       <- release.complete(())
+        first   <- owner.joinWithNever
+        second  <- waiter.joinWithNever
+      } yield {
+        assertEquals(pending, None); assertEquals(other, Map(1 -> 100))
+        assertEquals(first, Map(1 -> 1)); assertEquals(second, first)
+      }
+    })
+  }
+
+  test("write: idle expired cells remain charged and are pruned by the next publication") {
+    TestControl.executeEmbed {
+      for {
+        gauges <- Ref.of[IO, Map[String, Double]](Map.empty)
+        metrics = new CacheMetrics[IO] {
+                    override def path: IO[String] = IO.pure("")
+                    override def increment(name: String, tags: Map[String, String]): IO[Unit] = IO.unit
+                    override def gauge(name: String, tags: Map[String, String], value: Double): IO[Unit] =
+                      gauges.update(_.updated(name, value))
+                  }
+        _      <- SetCache.expireAfterWrite[IO, Int, Int, Int]("idle", ttl, 2L, true, metrics).use { c =>
+                    for {
+                      _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 1)))
+                      _       <- IO.sleep(31.seconds)
+                      idle    <- gauges.get
+                      asked   <- Ref.of[IO, Set[Int]](Set.empty)
+                      fresh   <- c.getOrUpdate(0, Set(1))(keys => asked.set(keys).as(Map(1 -> 10)))
+                      missing <- asked.get
+                      _       <- IO.sleep(31.seconds)
+                      pruned  <- gauges.get
+                    } yield {
+                      assertEquals(idle("cache_weight"), 2.0)
+                      assertEquals(idle("cache_size"), 1.0)
+                      assertEquals(missing, Set(1)); assertEquals(fresh, Map(1 -> 10))
+                      assertEquals(pruned("cache_weight"), 1.0)
+                      assert(pruned("cache_weight") <= pruned("cache_max_weight"))
+                    }
+                  }
+      } yield ()
+    }
+  }
 
   private def unexpected(keys: Set[Int]): IO[Map[Int, Int]] =
     IO.raiseError(new AssertionError(s"unexpected missing keys: $keys"))
@@ -151,7 +241,9 @@ class SetCacheContractTest extends CatsEffectSuite {
           asked    <- Ref.of[IO, Set[Int]](Set.empty)
           _        <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10, 2 -> 20)))
           missing  <- asked.get
-        } yield { assertEquals(response, Map(1 -> 1, 2 -> 2)); assertEquals(missing, Set(1, 2)) }
+        } yield {
+          assertEquals(response, Map(1 -> 1, 2 -> 2)); assertEquals(missing, if (access) Set(1, 2) else Set(1))
+        }
       })
     }
   }

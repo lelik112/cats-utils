@@ -6,7 +6,7 @@ import scala.concurrent.duration._
 
 import cats.effect.syntax.all._
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred,IO,Ref,Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -215,13 +215,13 @@ class SetCacheTest extends CatsEffectSuite {
     })
   }
 
-  test("[cats-effect] stale completion cannot overwrite an entry replaced after expiration") {
+  test("[cats-effect] stale completion cannot overwrite an entry explicitly replaced after a long load") {
     TestControl.executeEmbed(cache().use { cache =>
       for {
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
         old     <- cache.getOrUpdate("test", Set("1"))(_ => started.complete(()) *> release.get.as(Map("1" -> 1))).start
-        _       <- started.get *> IO.sleep(61.seconds)
+        _       <- started.get *> IO.sleep(61.seconds) *> cache.invalidate("test")
         _       <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
         _       <- release.complete(()) *> old.joinWithNever
         read    <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 3)))

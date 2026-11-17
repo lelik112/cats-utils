@@ -95,7 +95,7 @@ Intentional corrections:
 
 Per-key permits cover loads and updates; cancellation, failures, and stream termination release
 them. Invalidation coordinates with commits so obsolete loaders cannot recreate invalidated entries.
-If expiry or admission removes an entry before its lock can be used, a detached empty entry serves
+If admission (or access-mode group expiry) removes an entry before its lock can be used, a detached empty entry serves
 that request and is not published. This fixes the source's potential endless lock-identity retry
 with zero retention or immediate eviction; concurrent uncached requests need not coalesce.
 
@@ -116,10 +116,14 @@ Stage B deliberately changes SetCache factories and storage semantics:
   cells at selection time. A successful slow response can include earlier selected hits; retention
   prunes expired cells at publication, and a failed/canceled operation publishes no touch.
   Optional `refresh` is each cell's maximum write age. It is not background refresh.
-- Group expiry/admission still governs physical lifetime. Lost generations are not recreated by
-  late completions; TTL is a maximum permitted age, not a minimum retention guarantee. Same-group
-  fills and puts stay serialized, different-group loaders remain parallel, and invalidate does not
-  wait for the user loader. Creation, final publication and oversized removal share the commit gate.
+- Write-only cell freshness is separate from physical group lifetime: no outer write timer detaches
+  a group during a long fill. New cells begin their write age at successful publication even when
+  the load exceeds TTL. Idle expired cells remain charged until a later publication prunes them or
+  capacity evicts the group; freshness never returns them as new hits. Same-group misses wait for
+  the active loader rather than creating a timer replacement. Access/refresh group timers are unchanged.
+  Explicit invalidate and capacity eviction/replacement still prohibit late publication. Different-group
+  loaders remain parallel, invalidate does not wait for user code, and creation/final publication/
+  oversized removal retain the same identity gate. This changes cleanup timing and scheduling.
 - Negative entries and present zero-size values now cost one unit instead of zero. Unit-cost factories
   charge one per cell. Empty resident groups and placeholders also cost one. The shared budget bounds
   charged retained state with whole-K1 eviction, not per-ID LRU and not instantaneous total JVM memory.
