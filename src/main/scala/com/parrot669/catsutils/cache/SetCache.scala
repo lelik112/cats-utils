@@ -2,31 +2,33 @@
 package com.parrot669.catsutils.cache
 
 import java.time.Duration
+import scala.collection.immutable.SortedSet
 
+import cats.data.NonEmptySet
 import cats.effect.std.Semaphore
-import cats.effect.{Concurrent,Resource,Sync,Temporal}
+import cats.effect.{Concurrent, Resource, Sync, Temporal}
 import cats.syntax.all._
-import cats.{Defer,Functor}
+import cats.{Defer, Functor}
 
 abstract class SetCache[F[_]: Functor, K1, K2, V] {
-  final def getOrUpdate(key: K1, keys: Set[K2])(fill: Set[K2] => F[Map[K2, V]]): F[Map[K2, V]] =
+  final def getOrUpdate(key: K1, keys: NonEmptySet[K2])(fill: NonEmptySet[K2] => F[Map[K2, V]]): F[Map[K2, V]] =
     getOrUpdateOption(key, keys)(missing => fill(missing).map(value => Some(value)))
 
-  final def getOrUpdateOption(key: K1, keys: Set[K2])(
-    fill: Set[K2] => F[Option[Map[K2, V]]]
+  final def getOrUpdateOption(key: K1, keys: NonEmptySet[K2])(
+    fill: NonEmptySet[K2] => F[Option[Map[K2, V]]]
   ): F[Map[K2, V]] =
     getOrUpdateOptionEither[Nothing](key, keys)(missing => fill(missing).map(Right(_))).map {
       case Right(values) => values
       case Left(error)   => error
     }
 
-  final def getOrUpdateEither[E](key: K1, keys: Set[K2])(
-    fill: Set[K2] => F[Either[E, Map[K2, V]]]
+  final def getOrUpdateEither[E](key: K1, keys: NonEmptySet[K2])(
+    fill: NonEmptySet[K2] => F[Either[E, Map[K2, V]]]
   ): F[Either[E, Map[K2, V]]] =
     getOrUpdateOptionEither(key, keys)(missing => fill(missing).map(_.map(value => Some(value))))
 
-  def getOrUpdateOptionEither[E](key: K1, keys: Set[K2])(
-    fill: Set[K2] => F[Either[E, Option[Map[K2, V]]]]
+  def getOrUpdateOptionEither[E](key: K1, keys: NonEmptySet[K2])(
+    fill: NonEmptySet[K2] => F[Either[E, Option[Map[K2, V]]]]
   ): F[Either[E, Map[K2, V]]]
 
   def put(key: K1, values: Map[K2, V]): F[Unit]
@@ -70,52 +72,53 @@ object SetCache {
     private def live(state: Map[K2, Cell[V]], now: Long): Map[K2, Cell[V]] =
       state.filter { case (_, cell) => policy.fresh(cell, now) }
 
-    private def read[E](key: K1, keys: Set[K2])(
-      fill: Set[K2] => F[Either[E, Option[Map[K2, V]]]]
+    private def read[E](key: K1, keys: SortedSet[K2])(
+      fill: NonEmptySet[K2] => F[Either[E, Option[Map[K2, V]]]]
     ): F[Either[E, Map[K2, Option[V]]]] =
       update(key) { (state, now) =>
-        val missing = keys -- state.keySet
         val touched =
           if (policy.access.isEmpty) state
-          else state.map { case (k, cell) => k -> (if (keys(k)) cell.copy(accessedAt = now) else cell) }
-        if (missing.isEmpty)
-          metrics.hit(locked = true).as(Right(Change(touched, Map.empty[K2, Option[V]])))
-        else
-          metrics.load *> S
-            .defer(fill(missing))
-            .map(_.map {
-              case None           => Change(touched, Map.empty[K2, Option[V]])
-              case Some(received) =>
-                val values = received.map { case (k, v) => k -> (Some(v): Option[V]) }
-                val absent =
-                  if (cacheEmptyKeys) (missing -- received.keySet).map(_ -> Option.empty[V]).toMap
-                  else Map.empty[K2, Option[V]]
-                Change(touched, values ++ absent)
-            })
+          else keys.foldLeft(state)((cells, k) => cells.updatedWith(k)(_.map(_.copy(accessedAt = now))))
+
+        NonEmptySet.fromSet(keys.filterNot(state.contains)) match {
+          case None          => metrics.hit(locked = true).as(Right(Change(touched, Map.empty[K2, Option[V]])))
+          case Some(missing) =>
+            metrics.load *> S
+              .defer(fill(missing))
+              .map(_.map {
+                case None           => Change(touched, Map.empty[K2, Option[V]])
+                case Some(received) =>
+                  val values = received.iterator.map { case (k, v) => k -> (Some(v): Option[V]) }.toMap
+                  val absent =
+                    if (cacheEmptyKeys)
+                      missing.toSortedSet.iterator.filterNot(values.contains).map(_ -> Option.empty[V]).toMap
+                    else Map.empty[K2, Option[V]]
+                  Change(touched, values ++ absent)
+              })
+        }
       }
 
-    override def getOrUpdateOptionEither[E](key: K1, keys: Set[K2])(
-      fill: Set[K2] => F[Either[E, Option[Map[K2, V]]]]
-    ): F[Either[E, Map[K2, V]]] =
-      if (keys.isEmpty) F.pure(Right(Map.empty))
-      else {
-        val result =
-          if (policy.access.nonEmpty) read(key, keys)(fill)
-          else
-            cache.get(key).flatMap {
-              case Some(entry) =>
-                F.monotonic.flatMap { now =>
-                  val state = live(entry.state, now.toNanos)
-                  if (keys.forall(state.contains))
-                    metrics
-                      .hit(locked = false)
-                      .as(Right(state.map { case (k, cell) => k -> cell.value }): Either[E, Map[K2, Option[V]]])
-                  else read(key, keys)(fill)
-                }
-              case None        => read(key, keys)(fill)
-            }
-        result.map(_.map(_.collect { case (k, Some(v)) if keys(k) => k -> v }))
-      }
+    override def getOrUpdateOptionEither[E](key: K1, keys: NonEmptySet[K2])(
+      fill: NonEmptySet[K2] => F[Either[E, Option[Map[K2, V]]]]
+    ): F[Either[E, Map[K2, V]]] = {
+      val requested = keys.toSortedSet
+      val result    =
+        if (policy.access.nonEmpty) read(key, requested)(fill)
+        else
+          cache.get(key).flatMap {
+            case Some(entry) =>
+              F.monotonic.flatMap { now =>
+                val state = live(entry.state, now.toNanos)
+                if (requested.forall(state.contains))
+                  metrics
+                    .hit(locked = false)
+                    .as(Right(state.map { case (k, cell) => k -> cell.value }): Either[E, Map[K2, Option[V]]])
+                else read(key, requested)(fill)
+              }
+            case None        => read(key, requested)(fill)
+          }
+      result.map(_.map(values => requested.iterator.flatMap(k => values.get(k).flatten.map(k -> _)).toMap))
+    }
 
     override def put(key: K1, values: Map[K2, V]): F[Unit] =
       if (values.isEmpty) F.unit

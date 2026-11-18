@@ -2,11 +2,14 @@
 package com.parrot669.catsutils.cache
 
 import java.time.Duration
+import scala.collection.immutable.SortedSet
 import scala.concurrent.duration._
 
+import cats.Order
+import cats.data.NonEmptySet
 import cats.effect.syntax.all._
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred,IO,Ref,Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -24,10 +27,10 @@ class SetCacheTest extends CatsEffectSuite {
     TestControl.executeEmbed(cache().use { cache =>
       for {
         _     <- cache.put("test", Map("1" -> 1, "2" -> 2, "3" -> 3))
-        empty <- cache.getOrUpdate("test", Set("669"))(_ => IO.pure(Map.empty))
-        read0 <- cache.getOrUpdate("test", Set("669"))(_ => IO.pure(Map("669" -> 669)))
-        read1 <- cache.getOrUpdateOption("test", Set("1"))(_ => IO.pure(None))
-        read2 <- cache.getOrUpdate("test", Set("1", "2"))(_ => IO.pure(Map("2" -> 669)))
+        empty <- cache.getOrUpdate("test", NonEmptySet.one("669"))(_ => IO.pure(Map.empty))
+        read0 <- cache.getOrUpdate("test", NonEmptySet.one("669"))(_ => IO.pure(Map("669" -> 669)))
+        read1 <- cache.getOrUpdateOption("test", NonEmptySet.one("1"))(_ => IO.pure(None))
+        read2 <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => IO.pure(Map("2" -> 669)))
       } yield {
         assert(empty.isEmpty)
         assertEquals(read0, Map("669" -> 669))
@@ -40,8 +43,8 @@ class SetCacheTest extends CatsEffectSuite {
   test("[source] not replace empty value when cacheEmptyKeys = true") {
     TestControl.executeEmbed(cache(empty = true).use { cache =>
       for {
-        _    <- cache.getOrUpdate("test", Set("669"))(_ => IO.pure(Map.empty))
-        read <- cache.getOrUpdate("test", Set("669"))(_ => IO.pure(Map("669" -> 669)))
+        _    <- cache.getOrUpdate("test", NonEmptySet.one("669"))(_ => IO.pure(Map.empty))
+        read <- cache.getOrUpdate("test", NonEmptySet.one("669"))(_ => IO.pure(Map("669" -> 669)))
       } yield assert(read.isEmpty)
     })
   }
@@ -49,9 +52,9 @@ class SetCacheTest extends CatsEffectSuite {
   test("[source] not replace with empty value in the second call") {
     TestControl.executeEmbed(cache(empty = true).use { cache =>
       for {
-        _     <- cache.getOrUpdate("test", Set("669"))(_ => IO.pure(Map("669" -> 669)))
-        read1 <- cache.getOrUpdate("test", Set("669", "34"))(_ => IO.pure(Map("34" -> 34)))
-        read2 <- cache.getOrUpdate("test", Set("669", "34"))(_ => IO.pure(Map.empty))
+        _     <- cache.getOrUpdate("test", NonEmptySet.one("669"))(_ => IO.pure(Map("669" -> 669)))
+        read1 <- cache.getOrUpdate("test", NonEmptySet.of("669", "34"))(_ => IO.pure(Map("34" -> 34)))
+        read2 <- cache.getOrUpdate("test", NonEmptySet.of("669", "34"))(_ => IO.pure(Map.empty))
       } yield {
         assertEquals(read1, Map("669" -> 669, "34" -> 34))
         assertEquals(read2, Map("669" -> 669, "34" -> 34))
@@ -64,7 +67,7 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         _    <- cache.put("test", Map("1" -> 1, "2" -> 2, "3" -> 3))
         _    <- cache.put("test", Map("3" -> 669))
-        read <- cache.getOrUpdate("test", Set("1", "2", "3"))(_ => IO.pure(Map.empty))
+        read <- cache.getOrUpdate("test", NonEmptySet.of("1", "2", "3"))(_ => IO.pure(Map.empty))
       } yield assertEquals(read, Map("1" -> 1, "2" -> 2, "3" -> 669))
     })
   }
@@ -75,7 +78,7 @@ class SetCacheTest extends CatsEffectSuite {
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
         loading <- cache
-                     .getOrUpdate("test", Set("1", "2", "3")) { _ =>
+                     .getOrUpdate("test", NonEmptySet.of("1", "2", "3")) { _ =>
                        started.complete(()) *> release.get.as(Map("1" -> 1, "2" -> 2, "3" -> 3))
                      }
                      .start
@@ -83,7 +86,7 @@ class SetCacheTest extends CatsEffectSuite {
         putting <- cache.put("test", Map("1" -> 669, "5" -> 5)).start
         _       <- IO.cede *> release.complete(())
         _       <- loading.joinWithNever *> putting.joinWithNever
-        read    <- cache.getOrUpdate("test", Set("1", "2", "3", "5"))(_ => IO.pure(Map.empty))
+        read    <- cache.getOrUpdate("test", NonEmptySet.of("1", "2", "3", "5"))(_ => IO.pure(Map.empty))
       } yield assertEquals(read, Map("1" -> 669, "2" -> 2, "3" -> 3, "5" -> 5))
     })
   }
@@ -93,7 +96,7 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         _    <- cache.put("test", Map("1" -> 1, "2" -> 2, "3" -> 3))
         _    <- cache.invalidate("test")
-        read <- cache.getOrUpdate("test", Set("1", "2", "3"))(_ => IO.pure(Map.empty))
+        read <- cache.getOrUpdate("test", NonEmptySet.of("1", "2", "3"))(_ => IO.pure(Map.empty))
       } yield assert(read.isEmpty)
     })
   }
@@ -104,13 +107,13 @@ class SetCacheTest extends CatsEffectSuite {
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
         loading <- cache
-                     .getOrUpdate("test", Set("1", "2", "3")) { _ =>
+                     .getOrUpdate("test", NonEmptySet.of("1", "2", "3")) { _ =>
                        started.complete(()) *> release.get.as(Map("1" -> 1, "2" -> 2, "3" -> 3))
                      }
                      .start
         _       <- started.get *> cache.invalidate("test") *> release.complete(())
         _       <- loading.joinWithNever
-        read    <- cache.getOrUpdate("test", Set("1", "2", "3"))(_ => IO.pure(Map.empty))
+        read    <- cache.getOrUpdate("test", NonEmptySet.of("1", "2", "3"))(_ => IO.pure(Map.empty))
       } yield assert(read.isEmpty)
     })
   }
@@ -120,27 +123,119 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         _    <- cache.put("test", Map("1" -> 1, "2" -> 2, "3" -> 3))
         _    <- cache
-                  .getOrUpdate("test", Set("1", "2", "3"))(_ => IO.raiseError(new RuntimeException("BOOM")))
+                  .getOrUpdate("test", NonEmptySet.of("1", "2", "3"))(_ => IO.raiseError(new RuntimeException("BOOM")))
                   .handleError(_ => Map.empty)
-        read <- cache.getOrUpdate("test", Set("1", "2", "3"))(_ => IO.pure(Map.empty))
+        read <- cache.getOrUpdate("test", NonEmptySet.of("1", "2", "3"))(_ => IO.pure(Map.empty))
       } yield assertEquals(read, Map("1" -> 1, "2" -> 2, "3" -> 3))
     })
   }
 
-  test("[cats-effect] empty requests never invoke the loader") {
-    cache()
-      .use(_.getOrUpdate("test", Set.empty)(_ => IO.raiseError(new AssertionError("unexpected loader"))))
-      .map(result => assertEquals(result, Map.empty[String, Int]))
+  test("plain sets cannot cross the SetCache request boundary") {
+    assert(
+      compileErrors("""cache().use(_.getOrUpdate("g", Set.empty[String])(_ => IO.pure(Map.empty[String, Int])))""")
+        .contains("NonEmptySet")
+    )
+    assert(
+      compileErrors("""cache().use(_.getOrUpdateOption("g", Set.empty[String])(_ => IO.pure(None)))""").contains(
+        "NonEmptySet"
+      )
+    )
+    assert(
+      compileErrors("""cache().use(_.getOrUpdateEither[String]("g", Set.empty[String])(_ => IO.pure(Left("error"))))""")
+        .contains("NonEmptySet")
+    )
+    assert(
+      compileErrors(
+        """cache().use(_.getOrUpdateOptionEither[String]("g", Set.empty[String])(_ => IO.pure(Left("error"))))"""
+      ).contains("NonEmptySet")
+    )
+  }
+
+  test("a caller can skip an empty collection; a cached nonempty request skips the loader") {
+    cache().use { cache =>
+      def read(keys: SortedSet[String]) = NonEmptySet.fromSet(keys).fold(IO.pure(Map.empty[String, Int])) { requested =>
+        cache.getOrUpdate("g", requested)(_ => IO.raiseError(new AssertionError("unexpected loader")))
+      }
+
+      for {
+        skipped <- read(SortedSet.empty[String])
+        _       <- cache.put("g", Map("a" -> 1))
+        hit     <- read(SortedSet("a"))
+      } yield {
+        assertEquals(skipped, Map.empty[String, Int])
+        assertEquals(hit, Map("a" -> 1))
+      }
+    }
+  }
+
+  test("all four forms supply a nonempty missing set and preserve empty and error results") {
+    val request = NonEmptySet.of("first", "second")
+
+    def checkKeys(keys: NonEmptySet[String]): IO[Unit] = IO(assertEquals(keys, request))
+
+    cache().use { cache =>
+      for {
+        plain <- cache.getOrUpdate("g", request)(keys => checkKeys(keys).as(Map.empty[String, Int]))
+        empty <- cache.getOrUpdateOption("g", request)(keys => checkKeys(keys).as(None))
+        error <- cache.getOrUpdateEither[String]("g", request)(keys => checkKeys(keys).as(Left("denied")))
+        typed <- cache.getOrUpdateOptionEither[String]("g", request)(keys =>
+                   checkKeys(keys).as(Right(Some(Map.empty[String, Int])))
+                 )
+      } yield {
+        assertEquals(plain, Map.empty[String, Int])
+        assertEquals(empty, Map.empty[String, Int])
+        assertEquals(error, Left("denied"))
+        assertEquals(typed, Right(Map.empty[String, Int]))
+      }
+    }
+  }
+
+  test("missing keys retain the caller's reverse order and full key identity") {
+    val keys = NonEmptySet.of("N42", "W42", "R42")(Order.reverse(Order[String]))
+
+    cache().use { cache =>
+      for {
+        _      <- cache.put("g", Map("R42" -> 1))
+        result <- cache.getOrUpdate("g", keys) { missing =>
+                    IO(assertEquals(missing.toSortedSet.toList, List("W42", "N42"))).as(Map("N42" -> 2, "W42" -> 3))
+                  }
+      } yield assertEquals(result, Map("R42" -> 1, "N42" -> 2, "W42" -> 3))
+    }
+  }
+
+  test("comparator-equivalent extra keys are neither selected nor touched") {
+    val a        = NonEmptySet.one("a")(Order.by[String, Int](_.length))
+    val b        = NonEmptySet.one("b")(Order.by[String, Int](_.length))
+    val resource = SetCache.expireAfterAccess[IO, String, String, Int]("equivalent", Duration.ofSeconds(10), 10L, false)
+    TestControl.executeEmbed(resource.use { cache =>
+      for {
+        _       <- cache.put("g", Map("b" -> 2))
+        _       <- IO.sleep(5.seconds)
+        first   <- cache.getOrUpdate("g", a) { missing =>
+                     IO(assertEquals(missing.toSortedSet.toList, List("a"))).as(Map("a" -> 1, "c" -> 3))
+                   }
+        _       <- IO.sleep(4.seconds)
+        hit     <- cache.getOrUpdate("g", a)(_ => IO.raiseError(new AssertionError("lost requested key")))
+        _       <- IO.sleep(2.seconds)
+        expired <- cache.getOrUpdate("g", b) { missing =>
+                     IO(assertEquals(missing.toSortedSet.toList, List("b"))).as(Map("b" -> 20))
+                   }
+      } yield {
+        assertEquals(first, Map("a" -> 1))
+        assertEquals(hit, first)
+        assertEquals(expired, Map("b" -> 20))
+      }
+    })
   }
 
   test("[cats-effect] business errors preserve cached keys and allow retry") {
     TestControl.executeEmbed(cache(empty = true).use { cache =>
       for {
         _       <- cache.put("test", Map("1" -> 1))
-        failed  <- cache.getOrUpdateEither[String]("test", Set("1", "2")) { missing =>
-                     IO(assertEquals(missing, Set("2"))).as(Left("unavailable"))
+        failed  <- cache.getOrUpdateEither[String]("test", NonEmptySet.of("1", "2")) { missing =>
+                     IO(assertEquals(missing, NonEmptySet.one("2"))).as(Left("unavailable"))
                    }
-        retried <- cache.getOrUpdate("test", Set("1", "2"))(_ => IO.pure(Map("2" -> 2)))
+        retried <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => IO.pure(Map("2" -> 2)))
       } yield {
         assertEquals(failed, Left("unavailable"))
         assertEquals(retried, Map("1" -> 1, "2" -> 2))
@@ -153,8 +248,8 @@ class SetCacheTest extends CatsEffectSuite {
       val boom = new RuntimeException("loader failure")
       for {
         _       <- cache.put("test", Map("1" -> 1))
-        failed  <- cache.getOrUpdate("test", Set("1", "2"))(_ => IO.raiseError(boom)).attempt
-        retried <- cache.getOrUpdate("test", Set("1", "2"))(_ => IO.pure(Map("2" -> 2)))
+        failed  <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => IO.raiseError(boom)).attempt
+        retried <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => IO.pure(Map("2" -> 2)))
       } yield {
         assertEquals(failed, Left(boom))
         assertEquals(retried, Map("1" -> 1, "2" -> 2))
@@ -166,9 +261,9 @@ class SetCacheTest extends CatsEffectSuite {
     TestControl.executeEmbed(cache().use { cache =>
       for {
         started <- Deferred[IO, Unit]
-        loading <- cache.getOrUpdate("test", Set("1"))(_ => started.complete(()) *> IO.never).start
+        loading <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => started.complete(()) *> IO.never).start
         _       <- started.get *> loading.cancel
-        read    <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
+        read    <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2)))
       } yield assertEquals(read, Map("1" -> 2))
     })
   }
@@ -180,16 +275,16 @@ class SetCacheTest extends CatsEffectSuite {
         release   <- Deferred[IO, Unit]
         canceled  <- Ref.of[IO, Boolean](false)
         owner     <- cache
-                       .getOrUpdate("test", Set("1")) { _ =>
+                       .getOrUpdate("test", NonEmptySet.one("1")) { _ =>
                          (started.complete(()) *> release.get.as(Map("1" -> 1))).onCancel(canceled.set(true))
                        }
                        .start
         _         <- started.get
-        waiter    <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2))).start
+        waiter    <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2))).start
         _         <- IO.cede *> waiter.cancel *> release.complete(())
         result    <- owner.joinWithNever
         didCancel <- canceled.get
-        read      <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 3)))
+        read      <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 3)))
       } yield {
         assert(!didCancel)
         assertEquals(result, Map("1" -> 1))
@@ -203,11 +298,13 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
-        old     <- cache.getOrUpdate("test", Set("1"))(_ => started.complete(()) *> release.get.as(Map("1" -> 1))).start
+        old     <- cache
+                     .getOrUpdate("test", NonEmptySet.one("1"))(_ => started.complete(()) *> release.get.as(Map("1" -> 1)))
+                     .start
         _       <- started.get *> cache.invalidate("test")
-        fresh   <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
+        fresh   <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2)))
         _       <- release.complete(()) *> old.joinWithNever
-        read    <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 3)))
+        read    <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 3)))
       } yield {
         assertEquals(fresh, Map("1" -> 2))
         assertEquals(read, Map("1" -> 2))
@@ -220,11 +317,13 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
-        old     <- cache.getOrUpdate("test", Set("1"))(_ => started.complete(()) *> release.get.as(Map("1" -> 1))).start
+        old     <- cache
+                     .getOrUpdate("test", NonEmptySet.one("1"))(_ => started.complete(()) *> release.get.as(Map("1" -> 1)))
+                     .start
         _       <- started.get *> IO.sleep(61.seconds) *> cache.invalidate("test")
-        _       <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
+        _       <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2)))
         _       <- release.complete(()) *> old.joinWithNever
-        read    <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 3)))
+        read    <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 3)))
       } yield assertEquals(read, Map("1" -> 2))
     })
   }
@@ -232,9 +331,10 @@ class SetCacheTest extends CatsEffectSuite {
   test("[cats-effect] None does not negatively cache keys and extra returned keys are cached") {
     TestControl.executeEmbed(cache(empty = true).use { cache =>
       for {
-        none   <- cache.getOrUpdateOption("test", Set("1"))(_ => IO.pure(None))
-        first  <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 1, "2" -> 2)))
-        second <- cache.getOrUpdate("test", Set("2"))(_ => IO.raiseError(new AssertionError("unexpected loader")))
+        none   <- cache.getOrUpdateOption("test", NonEmptySet.one("1"))(_ => IO.pure(None))
+        first  <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 1, "2" -> 2)))
+        second <-
+          cache.getOrUpdate("test", NonEmptySet.one("2"))(_ => IO.raiseError(new AssertionError("unexpected loader")))
       } yield {
         assert(none.isEmpty)
         assertEquals(first, Map("1" -> 1))
@@ -250,8 +350,8 @@ class SetCacheTest extends CatsEffectSuite {
     test(s"[cats-effect] zero expiration mode $index completes requests without retaining data") {
       TestControl.executeEmbed(resource.use { cache =>
         for {
-          first  <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 1)))
-          second <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
+          first  <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 1)))
+          second <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2)))
         } yield {
           assertEquals(first, Map("1" -> 1))
           assertEquals(second, Map("1" -> 2))
@@ -270,11 +370,11 @@ class SetCacheTest extends CatsEffectSuite {
     )
     TestControl.executeEmbed(resource.use { cache =>
       for {
-        first  <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 1)))
-        second <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 2)))
-        _      <- cache.getOrUpdate("empty", Set("missing"))(_ => IO.pure(Map.empty))
+        first  <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 1)))
+        second <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 2)))
+        _      <- cache.getOrUpdate("empty", NonEmptySet.one("missing"))(_ => IO.pure(Map.empty))
         empty  <-
-          cache.getOrUpdate("empty", Set("missing"))(_ => IO.pure(Map("missing" -> 3)))
+          cache.getOrUpdate("empty", NonEmptySet.one("missing"))(_ => IO.pure(Map("missing" -> 3)))
       } yield {
         assertEquals(first, Map("1" -> 1))
         assertEquals(second, Map("1" -> 2))
@@ -296,8 +396,8 @@ class SetCacheTest extends CatsEffectSuite {
       val values = Map("1" -> 1, "2" -> 2)
       for {
         calls  <- Ref.of[IO, Int](0)
-        first  <- cache.getOrUpdate("test", Set("1", "2"))(_ => calls.update(_ + 1).as(values))
-        second <- cache.getOrUpdate("test", Set("1", "2"))(_ => calls.update(_ + 1).as(values))
+        first  <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => calls.update(_ + 1).as(values))
+        second <- cache.getOrUpdate("test", NonEmptySet.of("1", "2"))(_ => calls.update(_ + 1).as(values))
         count  <- calls.get
       } yield {
         assertEquals(first, values)
@@ -318,11 +418,14 @@ class SetCacheTest extends CatsEffectSuite {
       for {
         _      <- cache.put("test", Map("1" -> 1))
         _      <- IO.sleep(9.seconds)
-        first  <- cache.getOrUpdate("test", Set("1"))(_ => IO.raiseError(new AssertionError("premature expiry")))
+        first  <-
+          cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.raiseError(new AssertionError("premature expiry")))
         _      <- IO.sleep(9.seconds)
-        second <- cache.getOrUpdate("test", Set("1"))(_ => IO.raiseError(new AssertionError("access not refreshed")))
+        second <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ =>
+                    IO.raiseError(new AssertionError("access not refreshed"))
+                  )
         _      <- IO.sleep(11.seconds)
-        third  <- cache.getOrUpdate("test", Set("1"))(_ => IO.pure(Map("1" -> 3)))
+        third  <- cache.getOrUpdate("test", NonEmptySet.one("1"))(_ => IO.pure(Map("1" -> 3)))
       } yield {
         assertEquals(first, Map("1" -> 1))
         assertEquals(second, Map("1" -> 1))

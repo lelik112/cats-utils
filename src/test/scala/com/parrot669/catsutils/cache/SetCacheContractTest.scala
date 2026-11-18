@@ -3,8 +3,9 @@ package com.parrot669.catsutils.cache
 import java.time.Duration
 import scala.concurrent.duration._
 
+import cats.data.NonEmptySet
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred,IO,Ref,Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -36,15 +37,15 @@ class SetCacheContractTest extends CatsEffectSuite {
                              if (prior == 0) IO.sleep(16.minutes).as(result) else IO.pure(result)
                            }
           start         <- IO.monotonic
-          first         <- c.getOrUpdate(0, Set(1))(_ => load)
+          first         <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => load)
           completed     <- IO.monotonic
-          immediate     <- c.getOrUpdate(0, Set(1))(_ => load)
+          immediate     <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => load)
           atCompletion  <- calls.get
           _             <- IO.sleep(14.minutes + 59.seconds)
-          before        <- c.getOrUpdate(0, Set(1))(_ => load)
+          before        <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => load)
           beforeCount   <- calls.get
           _             <- IO.sleep(1.second)
-          boundary      <- c.getOrUpdate(0, Set(1))(_ => load)
+          boundary      <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => load)
           boundaryCount <- calls.get
         } yield {
           assertEquals(completed - start, 16.minutes)
@@ -62,10 +63,10 @@ class SetCacheContractTest extends CatsEffectSuite {
         entered <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
         done    <- Deferred[IO, Unit]
-        owner   <- c.getOrUpdate(0, Set(1))(_ => entered.complete(()) *> release.get.as(Map(1 -> 1))).start
+        owner   <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => entered.complete(()) *> release.get.as(Map(1 -> 1))).start
         _       <- entered.get *> IO.sleep(11.seconds)
-        waiter  <- c.getOrUpdate(0, Set(1))(unexpected).flatTap(_ => done.complete(())).start
-        other   <- c.getOrUpdate(1, Set(1))(_ => IO.pure(Map(1 -> 100)))
+        waiter  <- c.getOrUpdate(0, NonEmptySet.one(1))(unexpected).flatTap(_ => done.complete(())).start
+        other   <- c.getOrUpdate(1, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 100)))
         _       <- IO.sleep(1.nanosecond)
         pending <- done.tryGet
         _       <- release.complete(())
@@ -90,11 +91,11 @@ class SetCacheContractTest extends CatsEffectSuite {
                   }
         _      <- SetCache.expireAfterWrite[IO, Int, Int, Int]("idle", ttl, 2L, true, metrics).use { c =>
                     for {
-                      _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 1)))
+                      _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(1 -> 1)))
                       _       <- IO.sleep(31.seconds)
                       idle    <- gauges.get
                       asked   <- Ref.of[IO, Set[Int]](Set.empty)
-                      fresh   <- c.getOrUpdate(0, Set(1))(keys => asked.set(keys).as(Map(1 -> 10)))
+                      fresh   <- c.getOrUpdate(0, NonEmptySet.one(1))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
                       missing <- asked.get
                       _       <- IO.sleep(31.seconds)
                       pruned  <- gauges.get
@@ -110,7 +111,7 @@ class SetCacheContractTest extends CatsEffectSuite {
     }
   }
 
-  private def unexpected(keys: Set[Int]): IO[Map[Int, Int]] =
+  private def unexpected(keys: NonEmptySet[Int]): IO[Map[Int, Int]] =
     IO.raiseError(new AssertionError(s"unexpected missing keys: $keys"))
 
   List(false, true).foreach { negative =>
@@ -118,11 +119,11 @@ class SetCacheContractTest extends CatsEffectSuite {
       test(s"write: adding B does not refresh ${if (negative) "negative" else "positive"} A at $age") {
         TestControl.executeEmbed(cache().use { c =>
           for {
-            _       <- c.getOrUpdate(0, Set(1))(_ => IO.pure(if (negative) Map.empty else Map(1 -> 1)))
-            _       <- IO.sleep(5.seconds) *> c.getOrUpdate(0, Set(2))(_ => IO.pure(Map(2 -> 2)))
+            _       <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(if (negative) Map.empty else Map(1 -> 1)))
+            _       <- IO.sleep(5.seconds) *> c.getOrUpdate(0, NonEmptySet.one(2))(_ => IO.pure(Map(2 -> 2)))
             _       <- IO.sleep(age - 5.seconds)
             asked   <- Ref.of[IO, Set[Int]](Set.empty)
-            result  <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10)))
+            result  <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
             missing <- asked.get
           } yield {
             assertEquals(missing, if (age < 10.seconds) Set.empty[Int] else Set(1))
@@ -139,14 +140,14 @@ class SetCacheContractTest extends CatsEffectSuite {
     test(s"access: touching ${if (negative) "negative" else "positive"} A leaves B's boundary unchanged") {
       TestControl.executeEmbed(cache(access = true).use { c =>
         for {
-          _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(if (negative) Map(2 -> 2) else Map(1 -> 1, 2 -> 2)))
-          _       <- IO.sleep(9.seconds) *> c.getOrUpdate(0, Set(1))(unexpected)
+          _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(if (negative) Map(2 -> 2) else Map(1 -> 1, 2 -> 2)))
+          _       <- IO.sleep(9.seconds) *> c.getOrUpdate(0, NonEmptySet.one(1))(unexpected)
           _       <- IO.sleep(1.second)
           asked   <- Ref.of[IO, Set[Int]](Set.empty)
-          read    <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(2 -> 20)))
+          read    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(2 -> 20)))
           missing <- asked.get
           _       <- IO.sleep(10.seconds)
-          expired <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 10)))
+          expired <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 10)))
         } yield {
           assertEquals(missing, Set(2))
           assertEquals(read, if (negative) Map(2 -> 20) else Map(1 -> 1, 2 -> 20))
@@ -160,12 +161,12 @@ class SetCacheContractTest extends CatsEffectSuite {
     TestControl.executeEmbed(cache(access = true, refresh = Some(Duration.ofSeconds(15))).use { c =>
       for {
         calls  <- Ref.of[IO, Int](0)
-        _      <- c.getOrUpdate(0, Set(1))(_ => calls.update(_ + 1).as(Map(1 -> 1)))
-        _      <- IO.sleep(9.seconds) *> c.getOrUpdate(0, Set(1))(unexpected)
-        _      <- IO.sleep(5.seconds) *> c.getOrUpdate(0, Set(1))(unexpected)
+        _      <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => calls.update(_ + 1).as(Map(1 -> 1)))
+        _      <- IO.sleep(9.seconds) *> c.getOrUpdate(0, NonEmptySet.one(1))(unexpected)
+        _      <- IO.sleep(5.seconds) *> c.getOrUpdate(0, NonEmptySet.one(1))(unexpected)
         before <- calls.get
         _      <- IO.sleep(1.second)
-        at     <- c.getOrUpdate(0, Set(1))(_ => calls.update(_ + 1).as(Map(1 -> 2)))
+        at     <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => calls.update(_ + 1).as(Map(1 -> 2)))
         after  <- calls.get
       } yield { assertEquals(before, 1); assertEquals(after, 2); assertEquals(at, Map(1 -> 2)) }
     })
@@ -177,12 +178,12 @@ class SetCacheContractTest extends CatsEffectSuite {
         for {
           _       <- c.put(0, Map(1 -> 1))
           _       <- IO.sleep(4.seconds)
-          _       <- c.getOrUpdate(0, Set(2))(_ => IO.sleep(4.seconds).as(Map(2 -> 2)))
+          _       <- c.getOrUpdate(0, NonEmptySet.one(2))(_ => IO.sleep(4.seconds).as(Map(2 -> 2)))
           _       <- IO.sleep(2.seconds)
           asked   <- Ref.of[IO, Set[Int]](Set.empty)
-          read    <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10)))
+          read    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
           missing <- asked.get
-          _       <- IO.sleep(7.seconds) *> c.getOrUpdate(0, Set(2))(unexpected)
+          _       <- IO.sleep(7.seconds) *> c.getOrUpdate(0, NonEmptySet.one(2))(unexpected)
         } yield { assertEquals(missing, Set(1)); assertEquals(read, Map(1 -> 10, 2 -> 2)) }
       })
     }
@@ -190,12 +191,12 @@ class SetCacheContractTest extends CatsEffectSuite {
     test(s"$access: explicit put overwrites only its keys; empty put does not refresh") {
       TestControl.executeEmbed(cache(access).use { c =>
         for {
-          _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 1)))
+          _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(1 -> 1)))
           _       <- IO.sleep(5.seconds) *> c.put(0, Map(2 -> 2))
           _       <- IO.sleep(4.seconds) *> c.put(0, Map.empty)
           _       <- IO.sleep(1.second)
           asked   <- Ref.of[IO, Set[Int]](Set.empty)
-          read    <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10)))
+          read    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
           missing <- asked.get
         } yield { assertEquals(missing, Set(1)); assertEquals(read, Map(1 -> 10, 2 -> 2)) }
       })
@@ -209,23 +210,24 @@ class SetCacheContractTest extends CatsEffectSuite {
             _       <- IO.sleep(9.seconds)
             failed  <- failure match {
                          case "left"      =>
-                           c.getOrUpdateEither[String](0, Set(1, 2))(_ => IO.pure(Left("429")))
+                           c.getOrUpdateEither[String](0, NonEmptySet.of(1, 2))(_ => IO.pure(Left("429")))
                              .map(r => assertEquals(r, Left("429")))
                          case "exception" =>
-                           c.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new IllegalStateException("provider")))
-                             .attempt
+                           c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ =>
+                             IO.raiseError(new IllegalStateException("provider"))
+                           ).attempt
                              .map(r => assert(r.isLeft))
                          case _           =>
                            for {
                              entered <- Deferred[IO, Unit]
-                             f       <- c.getOrUpdate(0, Set(1, 2))(_ => entered.complete(()) *> IO.never).start
+                             f       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => entered.complete(()) *> IO.never).start
                              _       <- entered.get *> f.cancel
                              outcome <- f.join
                            } yield assert(outcome.isCanceled)
                        }
             _       <- IO.sleep(1.second)
             asked   <- Ref.of[IO, Set[Int]](Set.empty)
-            _       <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10, 2 -> 20)))
+            _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10, 2 -> 20)))
             missing <- asked.get
           } yield assertEquals(missing, Set(1, 2))
         })
@@ -237,9 +239,9 @@ class SetCacheContractTest extends CatsEffectSuite {
         for {
           _        <- c.put(0, Map(1 -> 1))
           _        <- IO.sleep(9.seconds)
-          response <- c.getOrUpdate(0, Set(1, 2))(_ => IO.sleep(11.seconds).as(Map(2 -> 2)))
+          response <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.sleep(11.seconds).as(Map(2 -> 2)))
           asked    <- Ref.of[IO, Set[Int]](Set.empty)
-          _        <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10, 2 -> 20)))
+          _        <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10, 2 -> 20)))
           missing  <- asked.get
         } yield {
           assertEquals(response, Map(1 -> 1, 2 -> 2)); assertEquals(missing, if (access) Set(1, 2) else Set(1))
@@ -254,9 +256,9 @@ class SetCacheContractTest extends CatsEffectSuite {
         _       <- c.put(0, Map(1 -> 1))
         _       <- IO.sleep(5.seconds) *> c.put(0, Map(3 -> 3))
         _       <- IO.sleep(4.seconds)
-        result  <- c.getOrUpdate(0, Set(1, 2))(_ => IO.sleep(2.seconds).as(Map(2 -> 2)))
+        result  <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.sleep(2.seconds).as(Map(2 -> 2)))
         asked   <- Ref.of[IO, Set[Int]](Set.empty)
-        _       <- c.getOrUpdate(0, Set(1, 2, 3))(keys => asked.set(keys).as(Map(1 -> 10)))
+        _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2, 3))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
         missing <- asked.get
       } yield { assertEquals(result, Map(1 -> 1, 2 -> 2)); assertEquals(missing, Set(1)) }
     })
@@ -267,10 +269,10 @@ class SetCacheContractTest extends CatsEffectSuite {
       for {
         _       <- c.put(0, Map(1 -> 1))
         _       <- IO.sleep(4.seconds)
-        _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.sleep(4.seconds).as(Map(2 -> 2)))
+        _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.sleep(4.seconds).as(Map(2 -> 2)))
         _       <- IO.sleep(6.seconds)
         asked   <- Ref.of[IO, Set[Int]](Set.empty)
-        _       <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10)))
+        _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10)))
         missing <- asked.get
       } yield assertEquals(missing, Set(1))
     })
@@ -281,13 +283,15 @@ class SetCacheContractTest extends CatsEffectSuite {
       TestControl.executeEmbed(cache(empty = empty).use { c =>
         for {
           calls   <- Ref.of[IO, List[Set[Int]]](Nil)
-          nothing <- c.getOrUpdate(0, Set.empty)(_ => IO.raiseError(new AssertionError("empty request")))
-          _       <- c.getOrUpdateOption(0, Set(1))(_ => IO.pure(None))
-          _       <- c.getOrUpdate(0, Set(1))(keys => calls.update(_ :+ keys).as(Map(1 -> 1)))
+          nothing <- c.getOrUpdateOption(0, NonEmptySet.one(1))(_ => IO.pure(None))
+          _       <- c.getOrUpdate(0, NonEmptySet.one(1))(keys => calls.update(_ :+ keys.toSortedSet).as(Map(1 -> 1)))
           _       <- IO.sleep(5.seconds)
-          partial <- c.getOrUpdate(0, Set(2, 3))(keys => calls.update(_ :+ keys).as(Map(1 -> 10, 2 -> 2, 4 -> 4)))
+          partial <- c.getOrUpdate(0, NonEmptySet.of(2, 3))(keys =>
+                       calls.update(_ :+ keys.toSortedSet).as(Map(1 -> 10, 2 -> 2, 4 -> 4))
+                     )
           _       <- IO.sleep(5.seconds)
-          read    <- c.getOrUpdate(0, Set(1, 2, 3, 4))(keys => calls.update(_ :+ keys).as(Map(3 -> 3)))
+          read    <-
+            c.getOrUpdate(0, NonEmptySet.of(1, 2, 3, 4))(keys => calls.update(_ :+ keys.toSortedSet).as(Map(3 -> 3)))
           seen    <- calls.get
         } yield {
           assertEquals(nothing, Map.empty[Int, Int]); assertEquals(partial, Map(2 -> 2))
@@ -306,10 +310,10 @@ class SetCacheContractTest extends CatsEffectSuite {
         entered <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
         done    <- Deferred[IO, Unit]
-        owner   <- c.getOrUpdate(0, Set(2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
+        owner   <- c.getOrUpdate(0, NonEmptySet.one(2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
         _       <- entered.get
-        waiter  <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 10))).flatTap(_ => done.complete(())).start
-        other   <- c.getOrUpdate(1, Set(1))(_ => IO.pure(Map(1 -> 100)))
+        waiter  <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 10))).flatTap(_ => done.complete(())).start
+        other   <- c.getOrUpdate(1, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 100)))
         _       <- IO.sleep(3.seconds)
         pending <- done.tryGet
         _       <- release.complete(()) *> owner.joinWithNever
@@ -325,10 +329,14 @@ class SetCacheContractTest extends CatsEffectSuite {
           entered  <- Deferred[IO, Unit]
           release  <- Deferred[IO, Unit]
           asked    <- Ref.of[IO, List[Set[Int]]](Nil)
-          owner    <- c.getOrUpdate(0, Set(1, 2))(_ => entered.complete(()) *> release.get.as(Map(1 -> 1, 2 -> 2))).start
+          owner    <-
+            c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => entered.complete(()) *> release.get.as(Map(1 -> 1, 2 -> 2)))
+              .start
           _        <- entered.get
-          overlap  <- c.getOrUpdate(0, Set(2, 3))(keys => asked.update(_ :+ keys).as(Map(3 -> 3))).start
-          disjoint <- c.getOrUpdate(0, Set(4))(keys => asked.update(_ :+ keys).as(Map(4 -> 4))).start
+          overlap  <-
+            c.getOrUpdate(0, NonEmptySet.of(2, 3))(keys => asked.update(_ :+ keys.toSortedSet).as(Map(3 -> 3))).start
+          disjoint <-
+            c.getOrUpdate(0, NonEmptySet.one(4))(keys => asked.update(_ :+ keys.toSortedSet).as(Map(4 -> 4))).start
           _        <- IO.cede *> release.complete(()) *> owner.joinWithNever
           a        <- overlap.joinWithNever
           b        <- disjoint.joinWithNever
@@ -346,9 +354,10 @@ class SetCacheContractTest extends CatsEffectSuite {
           entered <- Deferred[IO, Unit]
           release <- Deferred[IO, Unit]
           owner   <-
-            c.getOrUpdateEither[String](0, Set(1))(_ => entered.complete(()) *> release.get.as(Left("429"))).start
+            c.getOrUpdateEither[String](0, NonEmptySet.one(1))(_ => entered.complete(()) *> release.get.as(Left("429")))
+              .start
           _       <- entered.get
-          waiter  <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 1))).start
+          waiter  <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 1))).start
           _       <- IO.cede *> release.complete(())
           failure <- owner.joinWithNever
           value   <- waiter.joinWithNever
@@ -363,10 +372,10 @@ class SetCacheContractTest extends CatsEffectSuite {
         _       <- c.put(0, Map(1 -> 1))
         entered <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
-        old     <- c.getOrUpdate(0, Set(1, 2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
+        old     <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
         _       <- entered.get *> c.invalidate(0) *> c.put(0, Map(1 -> 10))
         _       <- release.complete(()) *> old.joinWithNever
-        read    <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(2 -> 20)))
+        read    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(2 -> 20)))
       } yield assertEquals(read, Map(1 -> 10, 2 -> 20))
     })
   }
@@ -389,8 +398,8 @@ class SetCacheContractTest extends CatsEffectSuite {
   test("zero access refresh retains nothing and terminates") {
     TestControl.executeEmbed(cache(access = true, refresh = Some(Duration.ZERO)).use { c =>
       for {
-        _      <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map.empty))
-        result <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 1)))
+        _      <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map.empty))
+        result <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 1)))
       } yield assertEquals(result, Map(1 -> 1))
     })
   }
@@ -421,7 +430,7 @@ class SetCacheContractTest extends CatsEffectSuite {
               case _       =>
                 val hit      = model.get(key).filter(_._2 > now)
                 val expected = hit.fold(key * 100)(_._1)
-                c.getOrUpdate(0, Set(key))(_ => IO.pure(Map(key -> (key * 100)))).map { value =>
+                c.getOrUpdate(0, NonEmptySet.one(key))(_ => IO.pure(Map(key -> (key * 100)))).map { value =>
                   assertEquals(value, Map(key -> expected))
                   val deadline = if (access || hit.isEmpty) now + 10 else hit.get._2
                   (now, model.updated(key, (expected, deadline)))
@@ -441,10 +450,12 @@ class SetCacheContractTest extends CatsEffectSuite {
             for {
               _      <- c.put(0, Map(1 -> 1))
               _      <- IO.sleep(4.seconds)
-              _      <- c.getOrUpdate(0, Set(2))(_ => IO.sleep(4.seconds).as(if (negative) Map.empty else Map(2 -> 2)))
+              _      <- c.getOrUpdate(0, NonEmptySet.one(2))(_ =>
+                          IO.sleep(4.seconds).as(if (negative) Map.empty else Map(2 -> 2))
+                        )
               _      <- IO.sleep(observed - 8.seconds)
               calls  <- Ref.of[IO, Int](0)
-              result <- c.getOrUpdate(0, Set(2))(_ => calls.update(_ + 1).as(Map(2 -> 20)))
+              result <- c.getOrUpdate(0, NonEmptySet.one(2))(_ => calls.update(_ + 1).as(Map(2 -> 20)))
               count  <- calls.get
             } yield {
               assertEquals(count, if (observed < 18.seconds) 0 else 1)
@@ -464,12 +475,13 @@ class SetCacheContractTest extends CatsEffectSuite {
       for {
         _       <- c.put(0, Map(1 -> 1, 2 -> 2))
         _       <- IO.sleep(9.seconds)
-        pair    <- (c.getOrUpdate(0, Set(1))(unexpected), c.getOrUpdate(0, Set(2))(unexpected)).parTupled
+        pair    <-
+          (c.getOrUpdate(0, NonEmptySet.one(1))(unexpected), c.getOrUpdate(0, NonEmptySet.one(2))(unexpected)).parTupled
         _       <- IO.sleep(1.second)
-        both    <- c.getOrUpdate(0, Set(1, 2))(unexpected)
+        both    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(unexpected)
         _       <- IO.sleep(10.seconds)
         asked   <- Ref.of[IO, Set[Int]](Set.empty)
-        _       <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 10, 2 -> 20)))
+        _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 10, 2 -> 20)))
         expired <- asked.get
       } yield {
         assertEquals(pair, (Map(1 -> 1), Map(2 -> 2)))
@@ -485,14 +497,14 @@ class SetCacheContractTest extends CatsEffectSuite {
         _        <- IO.sleep(9.seconds)
         entered  <- Deferred[IO, Unit]
         release  <- Deferred[IO, Unit]
-        owner    <- c.getOrUpdate(0, Set(1, 2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
+        owner    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => entered.complete(()) *> release.get.as(Map(2 -> 2))).start
         _        <- entered.get *> IO.sleep(7.seconds)
-        waiter   <- c.getOrUpdate(0, Set(3))(_ => IO.pure(Map(3 -> 3))).start
+        waiter   <- c.getOrUpdate(0, NonEmptySet.one(3))(_ => IO.pure(Map(3 -> 3))).start
         _        <- IO.sleep(4.seconds) *> release.complete(())
         response <- owner.joinWithNever
         _        <- waiter.joinWithNever
-        retained <- c.getOrUpdate(0, Set(2, 3))(unexpected)
-        fresh    <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 10)))
+        retained <- c.getOrUpdate(0, NonEmptySet.of(2, 3))(unexpected)
+        fresh    <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 10)))
       } yield {
         assertEquals(response, Map(1 -> 1, 2 -> 2))
         assertEquals(retained, Map(2 -> 2, 3 -> 3)); assertEquals(fresh, Map(1 -> 10))
@@ -508,15 +520,15 @@ class SetCacheContractTest extends CatsEffectSuite {
         entered     <- Deferred[IO, Unit]
         release     <- Deferred[IO, Unit]
         canceled    <- Ref.of[IO, Boolean](false)
-        owner       <- c.getOrUpdate(0, Set(2))(_ =>
+        owner       <- c.getOrUpdate(0, NonEmptySet.one(2))(_ =>
                          (entered.complete(()) *> release.get.as(Map(2 -> 2))).onCancel(canceled.set(true))
                        ).start
         _           <- entered.get
-        waiter      <- c.getOrUpdate(0, Set(1))(unexpected).start
+        waiter      <- c.getOrUpdate(0, NonEmptySet.one(1))(unexpected).start
         _           <- IO.sleep(1.second) *> waiter.cancel *> release.complete(())
         loaded      <- owner.joinWithNever
         _           <- IO.sleep(1.second)
-        read        <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 10)))
+        read        <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(1 -> 10)))
         wasCanceled <- canceled.get
         outcome     <- waiter.join
       } yield {

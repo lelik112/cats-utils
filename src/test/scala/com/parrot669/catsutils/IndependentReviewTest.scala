@@ -2,6 +2,7 @@ package com.parrot669.catsutils
 
 import java.time.{Duration, Instant}
 
+import cats.data.NonEmptySet
 import cats.effect.testkit.TestControl
 import cats.effect.{Deferred, IO, Ref}
 import cats.effect.{Sync, Temporal}
@@ -54,9 +55,10 @@ class IndependentReviewTest extends CatsEffectSuite {
         .use { cache =>
           for {
             calls <- Ref.of[IO, Int](0)
-            values = Map(1 -> 1, 2 -> 2, 3 -> 3, 4 -> 4)
-            _     <- cache.getOrUpdate(0, values.keySet)(_ => calls.update(_ + 1).as(values))
-            _     <- cache.getOrUpdate(0, values.keySet)(_ => calls.update(_ + 1).as(values))
+            keys   = NonEmptySet.of(1, 2, 3, 4)
+            values = keys.toSortedSet.iterator.map(i => i -> i).toMap
+            _     <- cache.getOrUpdate(0, keys)(_ => calls.update(_ + 1).as(values))
+            _     <- cache.getOrUpdate(0, keys)(_ => calls.update(_ + 1).as(values))
             count <- calls.get
           } yield assertEquals(count, 2, "4 GiB must not fit a weight limit of 1")
         }

@@ -53,7 +53,7 @@ or captured in loader functions.
 ```scala mdoc
 import java.time.Duration
 
-import cats.effect.{Sync, Temporal}
+import cats.effect.{Sync,Temporal}
 
 import com.parrot669.catsutils.cache.Cache
 
@@ -72,8 +72,10 @@ canceling the caller of `get` still cancels that caller. For `Cache[F, K, Nothin
 convenience methods `getOrUpdateValue` and `getOrUpdateOptionValue` with ordinary effectful loaders.
 
 SetCache and RangeCache provide ordinary effectful methods plus `getOrUpdateEither` and
-`getOrUpdateOptionEither` for business errors. An empty SetCache request returns an empty map
-without invoking the loader. `RangeCache.stream` returns `fs2.Stream[F, V]`;
+`getOrUpdateOptionEither` for business errors. Each SetCache read takes a Cats `NonEmptySet[K2]`. Its loader receives only
+missing keys, in a `NonEmptySet[K2]` with the request's ordering. A full hit skips the loader;
+a successful response may be an empty `Map`. Handle potentially empty inputs at the call site.
+`RangeCache.stream` returns `fs2.Stream[F, V]`;
 `streamEither` returns `Stream[F, Either[E, V]]`, emits at most one `Left`, and then ends.
 Earlier consumed gaps may already be cached. Raised exceptions still fail the stream.
 Range fills run in owned child fibers; cleanup finishes before their key permit is released.
@@ -162,9 +164,9 @@ For an IO application, allocate `IOLocal` at the application boundary and pass i
 ```scala mdoc
 import java.time.Duration
 
-import cats.effect.{IO, IOLocal, Resource}
+import cats.effect.{IO,IOLocal,Resource}
 
-import com.parrot669.catsutils.cache.{Cache, CacheMetricContext, CacheMetrics}
+import com.parrot669.catsutils.cache.{Cache,CacheMetricContext,CacheMetrics}
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 

@@ -3,7 +3,7 @@ package com.parrot669.catsutils
 import java.time.{Duration, Instant}
 import scala.concurrent.duration._
 
-import cats.data.Kleisli
+import cats.data.{Kleisli, NonEmptySet}
 import cats.effect.syntax.all._
 import cats.effect.testkit.TestControl
 import cats.effect.{Async, Deferred, IO, Resource}
@@ -37,7 +37,9 @@ class EffectPolymorphismTest extends CatsEffectSuite {
           first  <- raw.getOrUpdate("key")(Kleisli.ask[IO, String].map(Right(_)))
           cached <- raw.getOrUpdate("key")(F.raiseError(new AssertionError("cache hit evaluated loader")))
           values <-
-            set.getOrUpdate("bucket", Set(1, 2))(keys => Kleisli.ask[IO, String].map(env => keys.map(_ -> env).toMap))
+            set.getOrUpdate("bucket", NonEmptySet.of(1, 2))(keys =>
+              Kleisli.ask[IO, String].map(env => keys.toSortedSet.iterator.map(_ -> env).toMap)
+            )
           _      <- F.delay {
                       assertEquals(first, Right("request")); assertEquals(cached, first);
                       assertEquals(values, Map(1 -> "request", 2 -> "request"))
@@ -191,8 +193,11 @@ class EffectPolymorphismTest extends CatsEffectSuite {
     services
       .use { case (set, ranged) =>
         for {
-          setPlain   <- set.getOrUpdate("plain", Set(1))(_ => F.pure(null: Map[Int, String])).attempt
-          setTyped   <- set.getOrUpdateEither[String]("typed", Set(1))(_ => F.pure(Right(null: Map[Int, String]))).attempt
+          setPlain   <- set.getOrUpdate("plain", NonEmptySet.one(1))(_ => F.pure(null: Map[Int, String])).attempt
+          setTyped   <-
+            set
+              .getOrUpdateEither[String]("typed", NonEmptySet.one(1))(_ => F.pure(Right(null: Map[Int, String])))
+              .attempt
           rangePlain <- ranged.getOrUpdate("plain", range)(_ => F.pure(null: Iterable[(Instant, String)])).attempt
           rangeTyped <-
             ranged

@@ -3,8 +3,9 @@ package com.parrot669.catsutils.cache
 import java.time.Duration
 import scala.concurrent.duration._
 
+import cats.data.NonEmptySet
 import cats.effect.testkit.TestControl
-import cats.effect.{Deferred,IO,Ref,Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all._
 
 import munit.CatsEffectSuite
@@ -20,13 +21,13 @@ class SetCacheWeightTest extends CatsEffectSuite {
     test(s"$mode: aggregates above Int.MaxValue return successfully without retention for any maximum") {
       TestControl.executeEmbed {
         List(1L, Long.MaxValue).traverse_ { maximum =>
-          List(2, 4).traverse_ { count =>
+          List(NonEmptySet.of(1, 2), NonEmptySet.of(1, 2, 3, 4)).traverse_ { keys =>
             cache(_ => 1073741824, maximum).use { cache =>
-              val values = (1 to count).map(i => i -> i).toMap
+              val values = keys.toSortedSet.iterator.map(i => i -> i).toMap
               for {
                 calls  <- Ref.of[IO, Int](0)
-                first  <- cache.getOrUpdate(0, values.keySet)(_ => calls.update(_ + 1).as(values))
-                second <- cache.getOrUpdate(0, values.keySet)(_ => calls.update(_ + 1).as(values))
+                first  <- cache.getOrUpdate(0, keys)(_ => calls.update(_ + 1).as(values))
+                second <- cache.getOrUpdate(0, keys)(_ => calls.update(_ + 1).as(values))
                 loads  <- calls.get
               } yield {
                 assertEquals(first, values)
@@ -43,10 +44,11 @@ class SetCacheWeightTest extends CatsEffectSuite {
       TestControl.executeEmbed {
         IO(new java.util.concurrent.atomic.AtomicInteger(0)).flatMap { calls =>
           cache { value => calls.incrementAndGet(); value }.use { cache =>
+            val keys   = NonEmptySet.of(1, 2)
             val values = Map(1 -> (Int.MaxValue - 1), 2 -> 1)
             for {
-              first  <- cache.getOrUpdate(0, values.keySet)(_ => IO.pure(values))
-              second <- cache.getOrUpdate(0, values.keySet)(_ => IO.raiseError(new AssertionError("lost entry")))
+              first  <- cache.getOrUpdate(0, keys)(_ => IO.pure(values))
+              second <- cache.getOrUpdate(0, keys)(_ => IO.raiseError(new AssertionError("lost entry")))
             } yield {
               assertEquals(first, values)
               assertEquals(second, values)
@@ -63,9 +65,10 @@ class SetCacheWeightTest extends CatsEffectSuite {
           _        <- cache.put(0, Map(1 -> 1073741824))
           _        <- cache.put(0, Map(2 -> 1073741824))
           missing  <- Ref.of[IO, Set[Int]](Set.empty)
-          read     <- cache.getOrUpdate(0, Set(1, 2))(keys => missing.set(keys).as(Map(1 -> 1, 2 -> 2)))
+          read     <-
+            cache.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => missing.set(keys.toSortedSet).as(Map(1 -> 1, 2 -> 2)))
           asked    <- missing.get
-          retained <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new AssertionError("lost retry")))
+          retained <- cache.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.raiseError(new AssertionError("lost retry")))
         } yield {
           assertEquals(asked, Set(1, 2))
           assertEquals(read, Map(1 -> 1, 2 -> 2))
@@ -79,8 +82,8 @@ class SetCacheWeightTest extends CatsEffectSuite {
         for {
           _      <- cache.put(0, Map(1 -> 5))
           failed <- cache.put(0, Map(2 -> -1)).attempt
-          read   <- cache.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("lost original")))
-          retry  <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(2 -> 3)))
+          read   <- cache.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.raiseError(new AssertionError("lost original")))
+          retry  <- cache.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(2 -> 3)))
         } yield {
           assert(failed.swap.toOption.exists(_.isInstanceOf[IllegalArgumentException]))
           assertEquals(read, Map(1 -> 5))
@@ -98,9 +101,9 @@ class SetCacheWeightTest extends CatsEffectSuite {
           }.use { cache =>
             val values = Map(1 -> 1, 2 -> 2, 3 -> 3)
             for {
-              failed  <- cache.getOrUpdate(0, values.keySet)(_ => IO.pure(values)).attempt
+              failed  <- cache.getOrUpdate(0, NonEmptySet.of(1, 2, 3))(_ => IO.pure(values)).attempt
               checked <- IO(calls.get())
-              retry   <- cache.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 1)))
+              retry   <- cache.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 1)))
             } yield {
               assert(failed.swap.toOption.exists(_.isInstanceOf[IllegalArgumentException]))
               assertEquals(checked, 3)
@@ -117,9 +120,9 @@ class SetCacheWeightTest extends CatsEffectSuite {
         cache(value => if (value == 99) throw boom else value).use { cache =>
           for {
             _      <- cache.put(0, Map(1 -> 1))
-            failed <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(2 -> 99))).attempt
-            read   <- cache.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("lost original")))
-            retry  <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(2 -> 2)))
+            failed <- cache.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(2 -> 99))).attempt
+            read   <- cache.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.raiseError(new AssertionError("lost original")))
+            retry  <- cache.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(2 -> 2)))
           } yield {
             assertEquals(failed, Left(boom))
             assertEquals(read, Map(1 -> 1))
@@ -135,14 +138,16 @@ class SetCacheWeightTest extends CatsEffectSuite {
           started <- Deferred[IO, Unit]
           release <- Deferred[IO, Unit]
           old     <- cache
-                       .getOrUpdate(0, Set(1, 2)) { _ =>
+                       .getOrUpdate(0, NonEmptySet.of(1, 2)) { _ =>
                          started.complete(()) *> release.get.as(Map(1 -> Int.MaxValue, 2 -> Int.MaxValue))
                        }
                        .start
           _       <- started.get *> cache.invalidate(0)
           _       <- cache.put(0, Map(1 -> 1, 2 -> 2))
           _       <- release.complete(()) *> old.joinWithNever
-          read    <- cache.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new AssertionError("replacement invalidated")))
+          read    <- cache.getOrUpdate(0, NonEmptySet.of(1, 2))(_ =>
+                       IO.raiseError(new AssertionError("replacement invalidated"))
+                     )
         } yield assertEquals(read, Map(1 -> 1, 2 -> 2))
       })
     }
@@ -182,7 +187,9 @@ class SetCacheWeightTest extends CatsEffectSuite {
             _       <- resource.use { c =>
                          for {
                            _        <- (1 to 20).toList.traverse_(g =>
-                                         c.getOrUpdate(g, Set(1))(_ => IO.pure(if (kind == "zero") Map(1 -> 0) else Map.empty))
+                                         c.getOrUpdate(g, NonEmptySet.one(1))(_ =>
+                                           IO.pure(if (kind == "zero") Map(1 -> 0) else Map.empty)
+                                         )
                                        )
                            _        <- IO.sleep(31.seconds)
                            recorded <- gauges.get
@@ -213,9 +220,9 @@ class SetCacheWeightTest extends CatsEffectSuite {
           else SetCache.expireAfterWrite[IO, Int, Int, Int]("slots", Duration.ofDays(1), (_: Int) => 0, maximum, true)
         TestControl.executeEmbed(resource.use { c =>
           for {
-            _       <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map(1 -> 0)))
+            _       <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map(1 -> 0)))
             asked   <- Ref.of[IO, Set[Int]](Set.empty)
-            read    <- c.getOrUpdate(0, Set(1, 2))(keys => asked.set(keys).as(Map(1 -> 1, 2 -> 2)))
+            read    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(keys => asked.set(keys.toSortedSet).as(Map(1 -> 1, 2 -> 2)))
             missing <- asked.get
           } yield {
             assertEquals(missing, if (maximum < 2) Set(1, 2) else Set.empty[Int])
@@ -232,9 +239,10 @@ class SetCacheWeightTest extends CatsEffectSuite {
         else SetCache.expireAfterWrite[IO, Int, Int, Int]("overwrite", Duration.ofDays(1), 2L, true)
       TestControl.executeEmbed(resource.use { c =>
         for {
-          _    <- c.getOrUpdate(0, Set(1, 2))(_ => IO.pure(Map.empty))
+          _    <- c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.pure(Map.empty))
           _    <- c.put(0, Map(1 -> 1)) *> c.put(0, Map(1 -> 10))
-          read <- c.getOrUpdate(0, Set(1, 2))(_ => IO.raiseError(new AssertionError("overcharged overwrite")))
+          read <-
+            c.getOrUpdate(0, NonEmptySet.of(1, 2))(_ => IO.raiseError(new AssertionError("overcharged overwrite")))
         } yield assertEquals(read, Map(1 -> 10))
       })
     }
@@ -248,13 +256,13 @@ class SetCacheWeightTest extends CatsEffectSuite {
         for {
           started <- Deferred[IO, Unit]
           release <- Deferred[IO, Unit]
-          old     <- c.getOrUpdate(0, Set(1))(_ => started.complete(()) *> release.get.as(Map(1 -> 1))).start
+          old     <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => started.complete(()) *> release.get.as(Map(1 -> 1))).start
           _       <- started.get
           // Fill enough other groups to displace the old generation; no particular new victim is assumed.
           _       <- (1 to 20).toList.traverse_(g => c.put(g, Map(1 -> g)))
           _       <- c.put(0, Map(1 -> 100))
           _       <- release.complete(()) *> old.joinWithNever
-          read    <- c.getOrUpdate(0, Set(1))(_ => IO.pure(Map(1 -> 200)))
+          read    <- c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.pure(Map(1 -> 200)))
         } yield assert(read == Map(1 -> 100) || read == Map(1 -> 200))
       })
     }
@@ -275,7 +283,7 @@ class SetCacheWeightTest extends CatsEffectSuite {
           for {
             entered     <- Deferred[IO, Unit]
             release     <- Deferred[IO, Unit]
-            old         <- c.getOrUpdate(0, Set(1, 2)) { _ =>
+            old         <- c.getOrUpdate(0, NonEmptySet.of(1, 2)) { _ =>
                              entered.complete(()) *> release.get *>
                                (if (completion == "error") IO.raiseError[Map[Int, Int]](boom) else IO.pure(stale))
                            }.attempt
@@ -285,10 +293,12 @@ class SetCacheWeightTest extends CatsEffectSuite {
                            else (1 to 20).toList.traverse_(g => c.put(g, Map(1 -> g)))
             // Completion before release proves a new generation, rather than waiting on the old permit.
             _           <- c.put(0, Map(1 -> 100)).timeout(1.second)
-            replacement <- c.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("replacement absent")))
+            replacement <-
+              c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.raiseError(new AssertionError("replacement absent")))
             _           <- release.complete(())
             result      <- old.joinWithNever
-            retained    <- c.getOrUpdate(0, Set(1))(_ => IO.raiseError(new AssertionError("replacement removed")))
+            retained    <-
+              c.getOrUpdate(0, NonEmptySet.one(1))(_ => IO.raiseError(new AssertionError("replacement removed")))
           } yield {
             if (completion == "error") assertEquals(result, Left(boom))
             else assertEquals(result, Right(stale))

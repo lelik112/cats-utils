@@ -48,7 +48,7 @@ and implementations also run without IO fixed inside the library.
 | ZIO `Exit` success predicate | An effectful Cats Effect `Outcome` predicate |
 | Scoped exit predicate | An effectful `Resource.ExitCase` predicate |
 | `ZStream` | FS2 `Stream[F, A]`, or `Stream[F, Either[E, A]]` for typed business failures |
-| ZIO nonempty set | Scala `Set`; an empty request returns empty without a load |
+| ZIO nonempty set (SetCache request and loader) | Cats `NonEmptySet[K2]`; the result is an ordinary `Map[K2, V]` |
 | Fiber-local log annotation | `CacheMetricContext[F]` backed by application-supplied `cats.mtl.Local[F, String]` |
 | ZIO Duration | `java.time.Duration`; Effect sleeps and IO test runners use Scala finite durations |
 
@@ -139,7 +139,15 @@ a larger aggregate is returned to the caller without retention even with a large
 An oversized merged put removes the whole group. The generation check and removal remain under one
 gate so a stale oversized fill cannot delete a replacement. No second capacity registry is added.
 
-Result/error distinctions remain: empty requests do nothing, `None` does not mark missing keys absent,
+All four SetCache reads now require `NonEmptySet[K2]` for the request and the loader argument.
+This changes callers compiled against the Scala `Set` signatures. A caller with a possibly empty
+collection can build an ordered set using its key order, match `NonEmptySet.fromSet`, and return
+an empty result locally when there are no keys. Order keys by their full identity: a sorted set
+can represent two unequal keys together only if its ordering distinguishes them. Use an ordering
+consistent with Scala equality and hashing for the keys of the result map. The cache filters
+the request under its existing ordering and skips the loader on a full hit.
+
+`None` does not mark missing keys absent,
 `Some(empty)` can, and partial successful Maps are authoritative when `cacheEmptyKeys=true`. Consumers
 must represent uncertain provider results as failure rather than absent members of a successful Map.
 Left, exception and cancellation never become successful empty or negative entries. Unlike raw Cache,
