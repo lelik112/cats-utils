@@ -69,13 +69,14 @@ class EffectPolymorphismTest extends CatsEffectSuite {
   test("limiter constructors, token buckets and TimeRange validation are generic") {
     val rate       = RateLimits.Config(RateLimits.RateLimitsConfig(1, ttl), Map.empty)
     val historical = HistoricalLimits.Config(HistoricalLimits.LegacyLimitsConfig(Duration.ZERO, 1, ttl), Map.empty)
-    val services   = (RateLimits.make[App](F.pure(rate)), HistoricalLimits.make[App](F.pure(historical))).tupled
+    val services   =
+      (RateLimits.make[App](F.pure(rate), maxKeys = 16), HistoricalLimits.make[App](F.pure(historical))).tupled
     services
       .use { case (rates, history) =>
         for {
           bucket  <- RateLimits.TokenBucket.make[App](1, ttl)
           takes   <- (bucket.take, bucket.take).tupled
-          allowed <- (rates("user", "path"), rates("user", "path")).tupled
+          allowed <- (rates("user", "path").map(_.isAllowed), rates("user", "path").map(_.isAllowed)).tupled
           old     <- (history("user", "path", Instant.MIN), history("user", "path", Instant.MIN)).tupled
           range   <- TimeRange.makeF[App](from, until)
           invalid <- TimeRange.makeF[App](until, from).attempt

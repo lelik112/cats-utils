@@ -39,7 +39,7 @@ class MinimalCapabilitiesTest extends CatsEffectSuite {
     RangeCache.make[F, String, Int]("minimal-range", RangeCache.Config.expireAfterWrite(ttl))
 
   private def rates[F[_]: Sync: Temporal](config: F[RateLimits.Config]): Resource[F, RateLimits[F]] =
-    RateLimits.make[F](config)
+    RateLimits.make[F](config, maxKeys = 16)
 
   private def historical[F[_]: Sync: Temporal](config: F[HistoricalLimits.Config]): Resource[F, HistoricalLimits[F]] =
     HistoricalLimits.make[F](config)
@@ -81,7 +81,7 @@ class MinimalCapabilitiesTest extends CatsEffectSuite {
           a      <- cache.getOrUpdateValue("a")(F.pure(1))
           b      <- set.getOrUpdate("g", NonEmptySet.one("b"))(_ => F.pure(Map("b" -> 2)))
           c      <- range.getOrUpdate("g", interval)(_ => F.pure(List(Instant.EPOCH -> 3)))
-          d      <- rate("user", "path")
+          d      <- rate("user", "path").map(_.isAllowed)
           e      <- history("user", "path", Instant.MIN)
           path   <- resolvePath(context[App](implicitly[Local[App, String]]), F.pure("inner"))
           _      <- noop[App].increment("ignored", Map.empty)

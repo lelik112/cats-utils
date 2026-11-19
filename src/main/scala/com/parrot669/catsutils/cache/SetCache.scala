@@ -203,7 +203,7 @@ object SetCache {
       policy     <- Resource.eval(S.delay {
                       require(maxWeight >= 0, "set cache maximum weight must be nonnegative")
                       Policy(write.map(nanos), access.map(nanos))
-                   })
+                    })
       underlying <- Cache.make[F, K1, Nothing, Entry[F, K2, V]](
                       name,
                       // Write-only cell age begins at fill publication, not empty-group allocation.

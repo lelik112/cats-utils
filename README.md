@@ -12,7 +12,7 @@ No ZIO runtime, Prelude, streams, or test dependency is required.
 
 | Utility | Purpose | Construction |
 | --- | --- | --- |
-| [RateLimits](src/main/scala/com/parrot669/catsutils/RateLimits.scala) | Per-user/per-path token buckets and configuration reload | `Resource[F, RateLimits[F]]` |
+| [RateLimits](src/main/scala/com/parrot669/catsutils/RateLimits.scala) | Bounded per-user/per-path token buckets with typed admission | `Resource[F, RateLimits[F]]` |
 | [HistoricalLimits](src/main/scala/com/parrot669/catsutils/HistoricalLimits.scala) | Apply a bucket only before an age threshold | `Resource[F, HistoricalLimits[F]]` |
 | [Cache](src/main/scala/com/parrot669/catsutils/cache/Cache.scala) | Caffeine expiry, weight limits, and coordinated loads | `Resource[F, Cache[F, K, E, V]]` |
 | [SetCache](src/main/scala/com/parrot669/catsutils/cache/SetCache.scala) | Load missing members of a requested set | `Resource[F, SetCache[F, K1, K2, V]]` |
@@ -125,12 +125,33 @@ incomplete successful Map. Extra returned keys are retained and charged, but ret
 Left/errors/cancellation remain failures, never negative cache hits. A waiter may run its own fill
 when its predecessor failed or retained nothing; coalescing is per resident generation.
 
+## Bounded rate admission
+
+Construct `RateLimits.make[F](config, maxKeys)` once for the application Resource lifetime.
+`maxKeys`, each rule's capacity and its positive per-token refill interval are explicit inputs;
+there are no production defaults. Both refill and full recovery must fit signed nanoseconds.
+`limits(id, logicalPath)` returns `Allowed`, `Exhausted(retryAfter)`, or `CapacityRejected`.
+`Exhausted.retryAfterSeconds` rounds up; it promises no reservation against competing requests.
+Use `decision.isAllowed` only if collapsing exhaustion and capacity rejection is intentional.
+
+Existing debt is never LRU-evicted. Only fully recovered buckets can retire, lazily under key pressure;
+there is no one-minute reset or cleanup timer. The map retains at most `maxKeys` entries and clears
+on Resource release. Canonical bounded identity strings and a finite set of logical path classes
+remain the caller's responsibility. The default rule does not combine separate path budgets.
+
+Changing an effective rule explicitly resets that key's bucket in its slot; unchanged rules retain
+debt. A restart/new Resource resets all state. This is local admission, not a shared durable quota,
+concurrency limit, or business sliding window. HistoricalLimits retains its separate age-gated API.
+The old cache metrics overload is removed; callers can count the typed admission outcomes.
+See [migration details](MIGRATION.md#limits-and-circuit-breakers) for reload/cancellation guarantees.
+
 ## Effect requirements and migration
 
 The effect parameter is first: `Cache[F, K, E, V]`, `SetCache[F, K1, K2, V]`,
 `RangeCache[F, K, V]`, `RateLimits[F]`, `HistoricalLimits[F]`, and `CircuitBreakers[F]`.
 Cache and limiter factories require `Sync[F]` for suspended Java operations and `Temporal[F]`
-for concurrency, clocks, and the resource-owned meter's sleep. Circuit-breaker construction needs
+for concurrency, clocks, and, where present, the resource-owned meter's sleep. RateLimits has no meter.
+Circuit-breaker construction needs
 `Sync[F]` and `Concurrent[F]`, without a sleep capability. No factory requires `Async[F]` or
 callback registration. Supply coherent instances for the same effect runtime; the capabilities
 are separate so standard transformer instances can be inferred. When both are abstract implicit

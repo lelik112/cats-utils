@@ -191,11 +191,35 @@ lock wait. These are deliberate corrections to invalid-configuration/prolonged-w
 
 ## Limits and circuit breakers
 
-RateLimits preserves capacity, fractional per-token refill, path/user overrides, per-key isolation,
-and reset when configuration changes. HistoricalLimits consumes a token only when the start instant
-is **strictly before** the age threshold. Both retain the one-minute access-expiring bucket cache.
-Nonpositive capacity and negative refill duration fail the effect. The source's zero refill interval is
-retained: at an unchanged clock instant it does not refill; after time advances it fills to capacity.
+RateLimits now requires an explicit positive `maxKeys` in `make(config, maxKeys)` and returns
+`Allowed`, `Exhausted(retryAfter)`, or `CapacityRejected`. Convert with `decision.isAllowed` only
+when the distinction is intentionally irrelevant. The former optional CacheMetrics argument is
+removed: this implementation has no cache/meter or background task. Observe decisions at the caller.
+The bounded map never evicts outstanding debt for capacity. Fully recovered entries retire lazily
+when a new key needs a slot; expired-but-idle entries need no timer and remain bounded by `maxKeys`.
+Closing the Resource clears storage; an in-flight read cannot resurrect it. Retained handles cannot
+admit work after release. Capacity is fixed for that Resource; no implicit production limit is supplied.
+
+Capacity, path/user overrides and per-key isolation remain. `per` refills **one token**, not a full
+burst. Integer nanosecond debt retains fractional credit exactly. Both refill and capacity times
+refill must fit positive signed nanoseconds; zero/negative and overflowing rules fail before use.
+Elapsed arithmetic is exact across signed timestamp origins; a backwards observation grants no
+credit. `Exhausted.retryAfterSeconds` rounds up for Retry-After; a competing request may consume
+the next token, so the delay is not a reservation. Capacity rejection has no promised retry time.
+
+Every successfully read configuration snapshot participates in observation ordering, even if invalid.
+The latest accepted full snapshot is validated inside the critical section before bucket mutation.
+An invalid snapshot suppresses older observations and raises an error without changing bucket debt;
+failed source reads and canceled reads are not accepted. An effective valid rule change
+explicitly resets that key to a full bucket in its existing slot; it is not capacity eviction.
+Unchanged effective rules retain debt. A restart/new Resource resets all state. These are local
+process guarantees, not durable or cross-instance quotas. Key count does not bound arbitrary key
+string sizes or caller-supplied configuration size: use canonical bounded identifiers/logical paths.
+
+HistoricalLimits still consumes a token only when the start instant is **strictly before** the age
+threshold and retains its one-minute access-expiring cache. Its Boolean `TokenBucket.take` interface
+is preserved; it shares the stricter positive/representable refill validation and exact debt arithmetic.
+HistoricalLimits is not the bounded incoming-budget API and is otherwise outside this change.
 
 Concurrent configuration reads receive increasing tickets immediately before evaluating the supplied
 effect. Reads run outside the limiter mutex. After a read succeeds, the latest accepted snapshot is the
