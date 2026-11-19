@@ -2,7 +2,7 @@ package com.parrot669.catsutils
 
 import java.time.{Duration, Instant}
 
-import cats.data.Kleisli
+import cats.data.{Kleisli, NonEmptySet}
 import cats.effect.{Clock, Concurrent, IO, Ref, Resource, Sync, SyncIO, Temporal}
 import cats.mtl.Local
 import cats.syntax.all._
@@ -79,7 +79,7 @@ class MinimalCapabilitiesTest extends CatsEffectSuite {
           result <- example[App]
           _      <- Sync[App].delay(assertEquals(result, Right(42)))
           a      <- cache.getOrUpdateValue("a")(F.pure(1))
-          b      <- set.getOrUpdate("g", Set("b"))(_ => F.pure(Map("b" -> 2)))
+          b      <- set.getOrUpdate("g", NonEmptySet.one("b"))(_ => F.pure(Map("b" -> 2)))
           c      <- range.getOrUpdate("g", interval)(_ => F.pure(List(Instant.EPOCH -> 3)))
           d      <- rate("user", "path")
           e      <- history("user", "path", Instant.MIN)

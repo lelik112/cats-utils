@@ -53,7 +53,7 @@ or captured in loader functions.
 ```scala mdoc
 import java.time.Duration
 
-import cats.effect.{Sync, Temporal}
+import cats.effect.{Sync,Temporal}
 
 import com.parrot669.catsutils.cache.Cache
 
@@ -72,8 +72,10 @@ canceling the caller of `get` still cancels that caller. For `Cache[F, K, Nothin
 convenience methods `getOrUpdateValue` and `getOrUpdateOptionValue` with ordinary effectful loaders.
 
 SetCache and RangeCache provide ordinary effectful methods plus `getOrUpdateEither` and
-`getOrUpdateOptionEither` for business errors. An empty SetCache request returns an empty map
-without invoking the loader. `RangeCache.stream` returns `fs2.Stream[F, V]`;
+`getOrUpdateOptionEither` for business errors. Each SetCache read takes a Cats `NonEmptySet[K2]`. Its loader receives only
+missing keys, in a `NonEmptySet[K2]` with the request's ordering. A full hit skips the loader;
+a successful response may be an empty `Map`. Handle potentially empty inputs at the call site.
+`RangeCache.stream` returns `fs2.Stream[F, V]`;
 `streamEither` returns `Stream[F, Either[E, V]]`, emits at most one `Left`, and then ends.
 Earlier consumed gaps may already be cached. Raised exceptions still fail the stream.
 Range fills run in owned child fibers; cleanup finishes before their key permit is released.
@@ -104,7 +106,11 @@ Hits are selected after obtaining current state (and the group permit in access 
 can return a hit selected earlier, but cannot retain it past its own deadline. Access touches use
 selection time and are published only after success; Left, exception or cancellation commits no touch.
 New values get completion/publication time. Access hits may wait for an ongoing same-group fill.
-Physical group expiry or eviction can remove data earlier than its per-value TTL and fences old fills.
+Write-only groups have no outer time expiry: even a fill longer than TTL can publish new cells
+with a full completion-based age. Idle expired cells remain physically charged until publication
+prunes them or weighted capacity evicts the group. A same-group miss waits for the active loader
+instead of replacing it solely because time passed. Explicit invalidation and capacity eviction
+still fence old fills. Access-mode group expiry and optional refresh are unchanged.
 
 Each retained absent value costs 1; each present value costs `max(1, size(value))` after rejecting
 negative size. Without a custom size function, each costs 1. An empty group/placeholder also costs 1.
@@ -158,9 +164,9 @@ For an IO application, allocate `IOLocal` at the application boundary and pass i
 ```scala mdoc
 import java.time.Duration
 
-import cats.effect.{IO, IOLocal, Resource}
+import cats.effect.{IO,IOLocal,Resource}
 
-import com.parrot669.catsutils.cache.{Cache, CacheMetricContext, CacheMetrics}
+import com.parrot669.catsutils.cache.{Cache,CacheMetricContext,CacheMetrics}
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 

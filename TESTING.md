@@ -51,7 +51,11 @@ put/empty-put, failure/cancellation without touch, partial/extra-key results, gr
 waiter retry, invalidation, invalid configuration, zero retention, and a sequential reference model.
 `SetCacheWeightTest` retains all Int overflow/negative/throw/stale-generation cases and adds charged
 negative/zero-value/empty-group budgets, zero/one/finite capacity, whole-group behavior and overwrite
-accounting. Deferred-controlled races use no external service. Generic/Kleisli and capability tests
+accounting. Write-only long-load regressions use the actual15-minute TTL with16-minute loads
+for both positive and negative results, and check immediate/before-boundary/boundary counts.
+Idle charging/pruning and same-generation waiting after TTL are explicit controls. Real invalidate
+and capacity replacement are tested against old success/error/oversized completions; timer expiry
+is not used to manufacture write-mode replacements. Deferred-controlled races use no external service. Generic/Kleisli and capability tests
 retain their assertions while passing explicit SetCache capacities.
 
 ```sh

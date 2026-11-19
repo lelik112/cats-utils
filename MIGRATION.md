@@ -48,7 +48,7 @@ and implementations also run without IO fixed inside the library.
 | ZIO `Exit` success predicate | An effectful Cats Effect `Outcome` predicate |
 | Scoped exit predicate | An effectful `Resource.ExitCase` predicate |
 | `ZStream` | FS2 `Stream[F, A]`, or `Stream[F, Either[E, A]]` for typed business failures |
-| ZIO nonempty set | Scala `Set`; an empty request returns empty without a load |
+| ZIO nonempty set (SetCache request and loader) | Cats `NonEmptySet[K2]`; the result is an ordinary `Map[K2, V]` |
 | Fiber-local log annotation | `CacheMetricContext[F]` backed by application-supplied `cats.mtl.Local[F, String]` |
 | ZIO Duration | `java.time.Duration`; Effect sleeps and IO test runners use Scala finite durations |
 
@@ -95,7 +95,7 @@ Intentional corrections:
 
 Per-key permits cover loads and updates; cancellation, failures, and stream termination release
 them. Invalidation coordinates with commits so obsolete loaders cannot recreate invalidated entries.
-If expiry or admission removes an entry before its lock can be used, a detached empty entry serves
+If admission (or access-mode group expiry) removes an entry before its lock can be used, a detached empty entry serves
 that request and is not published. This fixes the source's potential endless lock-identity retry
 with zero retention or immediate eviction; concurrent uncached requests need not coalesce.
 
@@ -116,10 +116,14 @@ Stage B deliberately changes SetCache factories and storage semantics:
   cells at selection time. A successful slow response can include earlier selected hits; retention
   prunes expired cells at publication, and a failed/canceled operation publishes no touch.
   Optional `refresh` is each cell's maximum write age. It is not background refresh.
-- Group expiry/admission still governs physical lifetime. Lost generations are not recreated by
-  late completions; TTL is a maximum permitted age, not a minimum retention guarantee. Same-group
-  fills and puts stay serialized, different-group loaders remain parallel, and invalidate does not
-  wait for the user loader. Creation, final publication and oversized removal share the commit gate.
+- Write-only cell freshness is separate from physical group lifetime: no outer write timer detaches
+  a group during a long fill. New cells begin their write age at successful publication even when
+  the load exceeds TTL. Idle expired cells remain charged until a later publication prunes them or
+  capacity evicts the group; freshness never returns them as new hits. Same-group misses wait for
+  the active loader rather than creating a timer replacement. Access/refresh group timers are unchanged.
+  Explicit invalidate and capacity eviction/replacement still prohibit late publication. Different-group
+  loaders remain parallel, invalidate does not wait for user code, and creation/final publication/
+  oversized removal retain the same identity gate. This changes cleanup timing and scheduling.
 - Negative entries and present zero-size values now cost one unit instead of zero. Unit-cost factories
   charge one per cell. Empty resident groups and placeholders also cost one. The shared budget bounds
   charged retained state with whole-K1 eviction, not per-ID LRU and not instantaneous total JVM memory.
@@ -135,7 +139,15 @@ a larger aggregate is returned to the caller without retention even with a large
 An oversized merged put removes the whole group. The generation check and removal remain under one
 gate so a stale oversized fill cannot delete a replacement. No second capacity registry is added.
 
-Result/error distinctions remain: empty requests do nothing, `None` does not mark missing keys absent,
+All four SetCache reads now require `NonEmptySet[K2]` for the request and the loader argument.
+This changes callers compiled against the Scala `Set` signatures. A caller with a possibly empty
+collection can build an ordered set using its key order, match `NonEmptySet.fromSet`, and return
+an empty result locally when there are no keys. Order keys by their full identity: a sorted set
+can represent two unequal keys together only if its ordering distinguishes them. Use an ordering
+consistent with Scala equality and hashing for the keys of the result map. The cache filters
+the request under its existing ordering and skips the loader on a full hit.
+
+`None` does not mark missing keys absent,
 `Some(empty)` can, and partial successful Maps are authoritative when `cacheEmptyKeys=true`. Consumers
 must represent uncertain provider results as failure rather than absent members of a successful Map.
 Left, exception and cancellation never become successful empty or negative entries. Unlike raw Cache,
